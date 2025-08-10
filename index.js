@@ -42,6 +42,12 @@ const faqMap = [
   { keys: ['site','website','link','adres'],       reply: 'Site-ul nostru: https://pellvero.com/' },
 ];
 
+// --- Kimlik soruları (bot musun / insan mısın) kısa yanıtları ---
+const identityMap = [
+  { keys: ['bot musun','robot','yapay zek','ai misin','insan mısın','eşti bot','esti bot','ești om','esti om','sunteți om'], 
+    reply: 'Sunt asistent virtual al magazinului. Îți răspund rapid și politicos, iar dacă e nevoie te pot conecta la un operator uman.' }
+];
+
 // --- küçük yardımcı: sohbet içinden telefon yakala ---
 function pickPhone(text) {
   const digits = (text || '').replace(/\D+/g, '');
@@ -64,7 +70,7 @@ function scheduleIdleReminder(chatId) {
       if (!sess || sess.muted) return;
       await client.sendMessage(
         chatId,
-        'Doriți să finalizăm comanda? Dacă aveți detaliile pregătite, îmi puteți scrie numele complet, adresa, mărimea (EU 40–44), culoarea (negru/maro) și cantitatea (1 sau 2).'
+        'Doriți să finalizăm comanda? Dacă aveți detaliile pregătite, îmi puteți scrie numele complet (prenume + nume), adresa, mărimea (EU 40–44), culoarea (negru/maro) și cantitatea (1 sau 2).'
       );
     } catch {}
   }, 60_000);
@@ -82,15 +88,15 @@ Ești un asistent de vânzări pe WhatsApp pentru magazinul online românesc "${
 
 REGULI STRICTE:
 1) NU cere telefon în mod activ. Primești în context "Număr WhatsApp". Dacă clientul oferă un număr nou în text, FOLOSEȘTE acel număr în locul celui din WhatsApp și confirmă: "Notez acest număr pentru livrare."
-2) Numele trebuie să fie NUME COMPLET (minim două cuvinte: prenume + nume). Dacă primești un singur cuvânt, cere politicos numele complet.
-3) Adresa trebuie să conțină: stradă, număr, apartament (dacă există), COD POȘTAL și oraș/județ. Dacă lipsește un element, cere FIX acel detaliu.
-4) Mărimea acceptată DOAR EU 40–44 (nu alte valori).
-5) Culori disponibile DOAR: negru sau maro.
-6) Cantitate: 1 sau 2. Dacă este 2, solicită DOUĂ culori (pot fi și identice) sau cere clar: "Doriți ambele negru, ambele maro sau una negru și una maro?".
-7) Clientul poate scrie amestecat (ex: "2 43 negru"). Înțelege și extrage informațiile utile.
-8) NU trimite rezumatul până nu ai simultan: nume complet, adresă completă, mărime (40–44), culoare(-i) și cantitate. Spune explicit ce lipsește.
-9) Rezumatul final trebuie să includă: nume, adresă, telefonul ales, perechi, mărime, culoare(-i), total (1=179,90 LEI; 2=279,90 LEI), livrare 7–10 zile, transport gratuit. Cere confirmare cu «DA» sau «MODIFIC».
-10) La întrebări generale (preț, livrare, retur, IBAN) răspunde întâi scurt, apoi readu discuția către plasarea comenzii.
+2) Numele trebuie să fie NUME COMPLET: **prenume + nume** (minim două cuvinte). Dacă primești un singur cuvânt, cere politicos numele complet.
+3) Adresa TREBUIE să conțină: stradă, număr, apartament (dacă există), **COD POȘTAL**, oraș/județ. Dacă lipsește ceva, cere FIX acel detaliu; nu repeta ce avem deja.
+4) Mărime: DOAR EU **40–44** (nu alte valori). Acceptă "40 44" sau "42,43" stilinde şi clarifică pentru fiecare pereche la nevoie.
+5) Culori: DOAR **negru** sau **maro**.
+6) Cantitate: **1** sau **2**. Dacă este 2, cere clar **două culori** (pot fi identice) şi/sau două mărimi dacă clientul a dat două mărimi.
+7) Clientul poate scrie amestecat (ex: "2 43 negru"). Înțelege și extrage.
+8) NU trimite rezumatul până nu ai simultan: nume complet, adresă completă, mărime, culoare(-i) și cantitate. Spune explicit ce lipsește (doar lipsa).
+9) Rezumatul final va include: nume, adresă, **telefonul ales**, perechi, mărime, culoare(-i), total (1=179,90 LEI; 2=279,90 LEI), livrare 7–10 zile, transport gratuit. Cere confirmare cu «DA» sau «MODIFIC».
+10) La întrebări generale (preț, livrare, retur, IBAN) răspunde întâi scurt, apoi readu discuția către plasarea comenzii cu lista scurtă de câmpuri lipsă.
 `.trim();
 
     sessions.set(chatId, {
@@ -171,11 +177,20 @@ client.on('message', async (msg) => {
     }
     if (sess.muted) return;
 
+    // Kimlik soruları (bot musun / insan mısın)
+    for (const m of identityMap) {
+      if (m.keys.some(k => lower.includes(k))) {
+        await msg.reply(m.reply);
+        scheduleIdleReminder(chatId);
+        return;
+      }
+    }
+
     // SSS (önce)
     for (const f of faqMap) {
       if (f.keys.some(k => lower.includes(k))) {
         await msg.reply(f.reply);
-        await msg.reply('Doriți să continuăm cu plasarea comenzii? Vă rog numele complet, adresa, mărimea (EU 40–44), culoarea (negru/maro) și cantitatea (1 sau 2).');
+        await msg.reply('Doriți să continuăm cu plasarea comenzii? Vă rog numele complet (prenume + nume), adresa, mărimea (EU 40–44), culoarea (negru/maro) și cantitatea (1 sau 2).');
         scheduleIdleReminder(chatId);
         return;
       }
