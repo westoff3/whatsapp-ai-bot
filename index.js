@@ -1,73 +1,98 @@
 // === WhatsApp + OpenAI AI Sales Bot (ESM) ===
-// Çalışma: Railway / Node 18+
-// Env: OPENAI_API_KEY, (opsiyonel) STORE_NAME, BOT_DEFAULT_LANG
+// Çalışma Ortamı: Railway / Node 18+
+// Gerekli ENV: OPENAI_API_KEY, REDIS_URL
+// Opsiyonel ENV: STORE_NAME, BOT_DEFAULT_LANG
 // Komutlar: "operator" -> botu sustur, "bot" -> tekrar aç
 
 import pkg from 'whatsapp-web.js';
-const { Client, LocalAuth } = pkg;
+const { Client, RemoteAuth } = pkg;
 import qrcode from 'qrcode-terminal';
 import 'dotenv/config';
 import OpenAI from 'openai';
 import express from 'express';
-import QRCode from 'qrcode';   // yeni
-let lastQr = null;             // son QR'ı hafızada tutacağız
+import QRCode from 'qrcode';
+import { RedisStore } from 'wwebjs-redis';
+import { createClient } from 'redis';
 
-const app = express();
+// --- Redis Ayarı ---
+const redisClient = createClient({ url: process.env.REDIS_URL });
+await redisClient.connect();
+const store = new RedisStore({ client: redisClient });
+
+// --- Global ---
+let lastQr = null;
+const sessions = new Map();
 const PORT = process.env.PORT || 3000;
 
-// ---------- WhatsApp Client ----------
+// --- WhatsApp Client ---
 const client = new Client({
-  authStrategy: new LocalAuth(), // /app/.wwebjs_auth altında oturum saklar
+  authStrategy: new RemoteAuth({
+    store: store,
+    backupSyncIntervalMs: 300000 // 5dk
+  }),
   puppeteer: {
     headless: true,
     executablePath:
       process.env.PUPPETEER_EXECUTABLE_PATH ||
       process.env.CHROME_PATH ||
       '/usr/bin/chromium',
-    args: ['--no-sandbox', '--disable-setuid-sandbox'],
-  },
+    args: ['--no-sandbox', '--disable-setuid-sandbox']
+  }
 });
 
-// ---------- OpenAI ----------
+// --- OpenAI ---
 const ai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// ---------- Basit hafıza ----------
-const sessions = new Map(); // chatId -> { history:[{role,content}], muted:boolean }
+// --- SSS Şablonları ---
+const faqMap = {
+  'fiyat': 'Prețurile noastre: 1 pereche 179,90 LEI, 2 perechi 279,90 LEI. Transport gratuit.',
+  'iade': 'Aveți drept de retur în 14 zile. Produsele trebuie returnate neutilizate.',
+  'teslim': 'Livrarea durează 7–10 zile lucrătoare.',
+  'iban': 'Plata la livrare, nu este necesar transfer bancar.',
+};
 
+// --- Session Başlatma ---
 function bootstrap(chatId) {
   if (!sessions.has(chatId)) {
-    const store = process.env.STORE_NAME || 'Pellvero';
+    const storeName = process.env.STORE_NAME || 'Pellvero';
     const systemPrompt = `
-Ești un asistent de vânzări pe WhatsApp pentru magazinul online românesc "${store}".
-Răspunde ÎNTOTDEAUNA doar în limba română. Nu adăuga traduceri și nu folosi linii cu "TR:" sau altă limbă.
+Ești un asistent de vânzări pe WhatsApp pentru magazinul online românesc "${storeName}".
+Răspunde ÎNTOTDEAUNA doar în limba română. Nu adăuga traduceri și nu folosi altă limbă.
 Scopul tău este să finalizezi comenzi cu plată la livrare (COD).
-Dacă utilizatorul vrea să comande, cere pe rând: numele complet; adresa completă (stradă, număr, apartament, cod poștal); numărul de telefon; mărimea încălțămintei; culoarea dorită.
-Când ai suficiente informații, trimite un rezumat clar al comenzii și cere confirmarea cu „DA” sau „MODIFIC” pentru schimbări.
+Dacă utilizatorul vrea să comande, cere pe rând:
+1) Numele complet
+2) Adresa completă (stradă, număr, apartament, cod poștal)
+3) Mărimea încălțămintei
+4) Culoarea dorită
+Numărul de telefon NU se solicită — îl obținem automat din WhatsApp.
+Când ai suficiente informații, adaugă numărul de telefon obținut automat și trimite un rezumat clar, apoi cere confirmarea cu „DA” sau „MODIFIC”.
 Livrare: 7–10 zile lucrătoare.
 Prețuri: 1 pereche 179,90 LEI; 2 perechi 279,90 LEI. Transport gratuit, plată la livrare.
-Răspunde scurt (maxim 5 rânduri), politicos și natural.
+Răspunde scurt (max 5 rânduri), politicos și natural.
 `.trim();
 
     sessions.set(chatId, {
       muted: false,
-      history: [{ role: 'system', content: systemPrompt }],
+      history: [{ role: 'system', content: systemPrompt }]
     });
   }
   return sessions.get(chatId);
 }
 
-
+// --- AI Sorgulama ---
 async function askAI(chatId, text) {
   const sess = bootstrap(chatId);
+
   if (sess.history.length > 24) {
     sess.history = [sess.history[0], ...sess.history.slice(-12)];
   }
+
   sess.history.push({ role: 'user', content: text });
 
   const res = await ai.chat.completions.create({
-    model: 'gpt-4o-mini', // istersen gpt-3.5-turbo da kullanabilirsin
+    model: 'gpt-4o-mini',
     temperature: 0.3,
-    messages: sess.history,
+    messages: sess.history
   });
 
   const reply = res.choices?.[0]?.message?.content?.trim() || '';
@@ -75,7 +100,7 @@ async function askAI(chatId, text) {
   return reply;
 }
 
-// ---------- WhatsApp Events ----------
+// --- WhatsApp Eventleri ---
 client.on('qr', (qr) => {
   lastQr = qr;
   qrcode.generate(qr, { small: true });
@@ -88,14 +113,13 @@ client.on('ready', () => {
 
 client.on('message', async (msg) => {
   try {
-    if (msg.fromMe) return; // kendi mesajına dönmesin
+    if (msg.fromMe) return;
     const chatId = msg.from;
     const text = (msg.body || '').trim();
-    console.log(`📩 ${chatId}: ${text}`);
-
-    const sess = bootstrap(chatId);
-
     const lower = text.toLowerCase();
+
+    // --- Bot kontrol komutları ---
+    const sess = bootstrap(chatId);
     if (lower === 'operator') {
       sess.muted = true;
       await msg.reply('Vă conectăm cu un operator. Mulțumim!');
@@ -108,7 +132,25 @@ client.on('message', async (msg) => {
     }
     if (sess.muted) return;
 
-    const reply = await askAI(chatId, text);
+    // --- Site sorusu ---
+    if (lower.includes('site') || lower.includes('website') || lower.includes('link')) {
+      await msg.reply('Site-ul nostru: https://pellvero.com/');
+      return;
+    }
+
+    // --- SSS cevapları ---
+    for (const key in faqMap) {
+      if (lower.includes(key)) {
+        await msg.reply(faqMap[key]);
+        return;
+      }
+    }
+
+    // --- AI cevabı ---
+    const phoneFromWp = chatId.split('@')[0]; // WhatsApp'tan tel no
+    const injectedText = `${text}\n(Număr WhatsApp: ${phoneFromWp})`; // AI'ye ek bilgi
+
+    const reply = await askAI(chatId, injectedText);
     if (reply) await msg.reply(reply);
   } catch (err) {
     console.error('❌ Hata:', err);
@@ -118,10 +160,12 @@ client.on('message', async (msg) => {
   }
 });
 
-// ---------- Keepalive ----------
+// --- Express Keepalive ---
+const app = express();
+
 app.get('/qr', async (_req, res) => {
   try {
-    if (!lastQr) return res.status(404).send('QR hazır değil, logları kontrol edin.');
+    if (!lastQr) return res.status(404).send('QR hazır değil.');
     res.setHeader('Content-Type', 'image/png');
     const png = await QRCode.toBuffer(lastQr, { width: 360, margin: 1 });
     res.end(png);
@@ -131,6 +175,8 @@ app.get('/qr', async (_req, res) => {
 });
 
 app.get('/', (_req, res) => res.send('WhatsApp AI bot aktiv ✅'));
+
 app.listen(PORT, () => console.log(`HTTP portu: ${PORT}`));
 
+// --- Bot Başlat ---
 client.initialize();
