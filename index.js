@@ -13,7 +13,7 @@ import QRCode from 'qrcode';
 
 // --- Global ---
 let lastQr = null;
-const sessions = new Map();   // chatId -> { muted, history }
+const sessions = new Map();   // chatId -> { muted, history, stopReminders }
 const idleTimers = new Map(); // chatId -> timeoutId (1 dk hatırlatma)
 const PORT = process.env.PORT || 3000;
 
@@ -67,7 +67,7 @@ function scheduleIdleReminder(chatId) {
   const t = setTimeout(async () => {
     try {
       const sess = sessions.get(chatId);
-      if (!sess || sess.muted) return;
+      if (!sess || sess.muted || sess.stopReminders) return; // << yalnız "DA" sonrası durur
       await client.sendMessage(
         chatId,
         'Doriți să finalizăm comanda? Dacă aveți detaliile pregătite, îmi puteți scrie numele complet (prenume + nume), adresa, mărimea (EU 40–44), culoarea (negru/maro) și cantitatea (1 sau 2).'
@@ -101,7 +101,8 @@ REGULI STRICTE:
 
     sessions.set(chatId, {
       muted: false,
-      history: [{ role: 'system', content: systemPrompt }]
+      history: [{ role: 'system', content: systemPrompt }],
+      stopReminders: false // << eklendi
     });
   }
   return sessions.get(chatId);
@@ -158,6 +159,12 @@ client.on('message', async (msg) => {
 
     const sess = bootstrap(chatId);
 
+    // Yalnızca "DA" gelince dürtmeyi kalıcı kes
+    if (/^\s*da\s*$/i.test(text)) {
+      sess.stopReminders = true;
+      clearTimeout(idleTimers.get(chatId));
+    }
+
     // Kontrol komutları
     if (lower === 'operator') {
       sess.muted = true;
@@ -166,6 +173,7 @@ client.on('message', async (msg) => {
     }
     if (lower === 'bot') {
       sess.muted = false;
+      sess.stopReminders = false; // bot yeniden açıldı → dürtmeler tekrar aktif
       await msg.reply('Asistentul a fost reactivat. Cum vă pot ajuta?');
       return;
     }
@@ -191,7 +199,7 @@ client.on('message', async (msg) => {
       if (f.keys.some(k => lower.includes(k))) {
         await msg.reply(f.reply);
         await msg.reply('Doriți să continuăm cu plasarea comenzii? Vă rog numele complet (prenume + nume), adresa, mărimea (EU 40–44), culoarea (negru/maro) și cantitatea (1 sau 2).');
-        scheduleIdleReminder(chatId);
+        if (!sessions.get(chatId).stopReminders) scheduleIdleReminder(chatId);
         return;
       }
     }
@@ -201,7 +209,7 @@ client.on('message', async (msg) => {
     if (reply) {
       await msg.reply(reply);
       // Her cevaptan sonra 1 dk içinde yanıt gelmezse kibar hatırlatma
-      scheduleIdleReminder(chatId);
+      if (!sessions.get(chatId).stopReminders) scheduleIdleReminder(chatId);
     }
 
   } catch (err) {
