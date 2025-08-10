@@ -15,10 +15,13 @@ const PORT = process.env.PORT || 3000;
 
 // ---------- WhatsApp Client ----------
 const client = new Client({
-  authStrategy: new LocalAuth(), // session/ klasöründe oturum saklar
+  authStrategy: new LocalAuth(), // /app/.wwebjs_auth altında oturum saklar
   puppeteer: {
     headless: true,
-    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH,
+    executablePath:
+      process.env.PUPPETEER_EXECUTABLE_PATH ||
+      process.env.CHROME_PATH ||
+      '/usr/bin/chromium',
     args: ['--no-sandbox', '--disable-setuid-sandbox'],
   },
 });
@@ -53,14 +56,13 @@ You are a WhatsApp sales assistant for the Romanian online store "${store}".
 
 async function askAI(chatId, text) {
   const sess = bootstrap(chatId);
-  // hafızayı şişirmemek için kısalt
   if (sess.history.length > 24) {
     sess.history = [sess.history[0], ...sess.history.slice(-12)];
   }
   sess.history.push({ role: 'user', content: text });
 
   const res = await ai.chat.completions.create({
-    model: 'gpt-4o-mini',     // istersen gpt-3.5-turbo da kullanabilirsin
+    model: 'gpt-4o-mini', // istersen gpt-3.5-turbo da kullanabilirsin
     temperature: 0.3,
     messages: sess.history,
   });
@@ -72,9 +74,8 @@ async function askAI(chatId, text) {
 
 // ---------- WhatsApp Events ----------
 client.on('qr', (qr) => {
-  // Railway Logs içinde ASCII QR görünecek
   qrcode.generate(qr, { small: true });
-  console.log('🔑 QR çıktı. WhatsApp > Bağlı Cihazlar > Cihaz Bağla ile tara.');
+  console.log('🔑 QR hazır. WhatsApp > Bağlı Cihazlar > Cihaz Bağla ile tara.');
 });
 
 client.on('ready', () => {
@@ -90,7 +91,6 @@ client.on('message', async (msg) => {
 
     const sess = bootstrap(chatId);
 
-    // Operatör devre dışı / aktif komutları
     const lower = text.toLowerCase();
     if (lower === 'operator') {
       sess.muted = true;
@@ -104,7 +104,6 @@ client.on('message', async (msg) => {
     }
     if (sess.muted) return;
 
-    // AI cevabı
     const reply = await askAI(chatId, text);
     if (reply) await msg.reply(reply);
   } catch (err) {
@@ -115,7 +114,7 @@ client.on('message', async (msg) => {
   }
 });
 
-// ---------- Keepalive (Railway) ----------
+// ---------- Keepalive ----------
 app.get('/', (_req, res) => res.send('WhatsApp AI bot aktiv ✅'));
 app.listen(PORT, () => console.log(`HTTP portu: ${PORT}`));
 
