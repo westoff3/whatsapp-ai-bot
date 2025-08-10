@@ -13,7 +13,7 @@
     "dotenv": "^16.4.5",
     "openai": "^4.52.0",
     "express": "^4.19.2",
-    "redis": "^4.6.7",
-    "wwebjs-redis": "^1.0.0"
+    "redis": "^4.6.13",
+    "wwebjs-redis": "github:pedroslopez/wwebjs-redis"
   }
 }
