@@ -9,6 +9,8 @@ import qrcode from 'qrcode-terminal';
 import 'dotenv/config';
 import OpenAI from 'openai';
 import express from 'express';
+import QRCode from 'qrcode';   // yeni
+let lastQr = null;             // son QR'ı hafızada tutacağız
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -74,6 +76,7 @@ async function askAI(chatId, text) {
 
 // ---------- WhatsApp Events ----------
 client.on('qr', (qr) => {
+  lastQr = qr;
   qrcode.generate(qr, { small: true });
   console.log('🔑 QR hazır. WhatsApp > Bağlı Cihazlar > Cihaz Bağla ile tara.');
 });
@@ -115,6 +118,17 @@ client.on('message', async (msg) => {
 });
 
 // ---------- Keepalive ----------
+app.get('/qr', async (_req, res) => {
+  try {
+    if (!lastQr) return res.status(404).send('QR hazır değil, logları kontrol edin.');
+    res.setHeader('Content-Type', 'image/png');
+    const png = await QRCode.toBuffer(lastQr, { width: 360, margin: 1 });
+    res.end(png);
+  } catch (e) {
+    res.status(500).send('QR oluşturulamadı.');
+  }
+});
+
 app.get('/', (_req, res) => res.send('WhatsApp AI bot aktiv ✅'));
 app.listen(PORT, () => console.log(`HTTP portu: ${PORT}`));
 
