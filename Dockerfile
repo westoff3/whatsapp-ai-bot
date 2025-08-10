@@ -1,7 +1,7 @@
-# Node 18 + Debian
+# Node 18 + Debian Bullseye (stabil)
 FROM node:18-bullseye
 
-# Chromium ve gerekli sistem kütüphaneleri
+# Chromium ve gerekli kütüphaneler
 RUN apt-get update && apt-get install -y \
     chromium ca-certificates fonts-liberation \
     libasound2 libatk-bridge2.0-0 libatk1.0-0 libcairo2 libcups2 \
@@ -13,14 +13,22 @@ RUN apt-get update && apt-get install -y \
     libxrender1 libxkbcommon0 libxshmfence1 libxss1 libgbm1 libdrm2 \
   && rm -rf /var/lib/apt/lists/*
 
-# Puppeteer kendi Chromium’unu indirmesin; sistemdeki Chromium’u kullanacağız
+# Puppeteer kendi Chrome'unu indirmesin; sistemdeki Chromium'u kullansın
 ENV PUPPETEER_SKIP_DOWNLOAD=true
 ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 ENV CHROME_PATH=/usr/bin/chromium
 
+# Uygulama dizini
 WORKDIR /app
+
+# Önce package dosyaları (cache-friendly)
 COPY package*.json ./
-# lock dosyası gerekmesin, dev bağımlılıkları kurulmasın
+
+# Prod bağımlılıklarını kur
 RUN npm install --omit=dev --no-audit --no-fund --legacy-peer-deps
 
-CMD ["node", "index.js"]
+# Uygulama kodu
+COPY . .
+
+# Uygulamayı başlat
+CMD ["npm", "start"]
