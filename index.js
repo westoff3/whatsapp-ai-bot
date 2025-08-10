@@ -1,23 +1,15 @@
 // === WhatsApp + OpenAI AI Sales Bot (ESM) ===
 // Çalışma Ortamı: Railway / Node 18+
-// Gerekli ENV: OPENAI_API_KEY, REDIS_URL
+// Gerekli ENV: OPENAI_API_KEY
 // Opsiyonel ENV: STORE_NAME
-// Komutlar: "operator" -> botu sustur, "bot" -> tekrar aç, "nouă comandă" -> akışı resetle
 
 import pkg from 'whatsapp-web.js';
-const { Client, RemoteAuth } = pkg;
+const { Client, LocalAuth } = pkg;
 import qrcode from 'qrcode-terminal';
 import 'dotenv/config';
 import OpenAI from 'openai';
 import express from 'express';
 import QRCode from 'qrcode';
-import { RedisStore } from 'wwebjs-redis';
-import { createClient } from 'redis';
-
-// --- Redis Ayarı ---
-const redisClient = createClient({ url: process.env.REDIS_URL });
-await redisClient.connect();
-const store = new RedisStore({ client: redisClient });
 
 // --- Global ---
 let lastQr = null;
@@ -26,10 +18,7 @@ const PORT = process.env.PORT || 3000;
 
 // --- WhatsApp Client ---
 const client = new Client({
-  authStrategy: new RemoteAuth({
-    store: store,
-    backupSyncIntervalMs: 300000 // 5dk
-  }),
+  authStrategy: new LocalAuth(),
   puppeteer: {
     headless: true,
     executablePath:
@@ -80,7 +69,7 @@ Dacă utilizatorul pune întrebări generale (preț, livrare, retur), răspunde 
       stepIndex: 0,
       awaitingConfirm: false,
       order: {
-        phone: chatId.split('@')[0], // WP'den otomatik
+        phone: chatId.split('@')[0],
         name: '',
         address: '',
         size: '',
@@ -117,12 +106,12 @@ function validateAndFill(sess, text) {
       sess.stepIndex++;
       return { ok: true };
     }
-    return { ok: false, msg: 'Te rog numele și prenumele (două cuvinte). Exemplu: Ion Popescu.' };
+    return { ok: false, msg: 'Te rog numele și prenumele (două cuvinte).' };
   }
 
   if (step === 'address') {
     if (text.trim().length < 12) {
-      return { ok: false, msg: 'Adresa pare incompletă. Te rog: stradă, număr, apartament, cod poștal, oraș.' };
+      return { ok: false, msg: 'Adresa pare incompletă.' };
     }
     o.address = text.trim();
     sess.stepIndex++;
@@ -139,8 +128,7 @@ function validateAndFill(sess, text) {
 
   if (step === 'color') {
     const low = text.toLowerCase();
-    // TR -> RO eşlemeleri
-    const tr2ro = { siyah: 'negru', kahverengi: 'maro', siyahı: 'negru', kahverengı: 'maro', 'kahverengİ': 'maro' };
+    const tr2ro = { siyah: 'negru', kahverengi: 'maro', siyahı: 'negru', kahverengı: 'maro' };
     let color = COLORS.find(c => low.includes(c));
     if (!color) {
       for (const [tr, ro] of Object.entries(tr2ro)) {
@@ -157,7 +145,6 @@ function validateAndFill(sess, text) {
     const m = text.match(/\b[12]\b/);
     if (!m) return { ok: false, msg: 'Te rog scrie 1 sau 2.' };
     o.quantity = m[0];
-    // adımlar bitti → onay bekle
     sess.awaitingConfirm = true;
     return { ok: true };
   }
@@ -183,7 +170,7 @@ Confirmați cu „DA” sau scrieți „MODIFIC”.`
   );
 }
 
-// --- AI (sadece akış dışı / serbest sohbet) ---
+// --- AI ---
 async function askAI(chatId, text) {
   const sess = bootstrap(chatId);
   if (sess.history.length > 24) {
@@ -206,7 +193,7 @@ async function askAI(chatId, text) {
 client.on('qr', (qr) => {
   lastQr = qr;
   qrcode.generate(qr, { small: true });
-  console.log('🔑 QR hazır. WhatsApp > Bağlı Cihazlar > Cihaz Bağla ile tara.');
+  console.log('🔑 QR hazır. WhatsApp > Bağlı Cihazlar > Tara.');
 });
 
 client.on('ready', () => {
@@ -219,18 +206,16 @@ client.on('message', async (msg) => {
     const chatId = msg.from;
     const text = (msg.body || '').trim();
     const lower = text.toLowerCase();
-
     const sess = bootstrap(chatId);
 
-    // --- Komutlar ---
     if (lower === 'operator') {
       sess.muted = true;
-      await msg.reply('Vă conectăm cu un operator. Mulțumim!');
+      await msg.reply('Vă conectăm cu un operator.');
       return;
     }
     if (lower === 'bot') {
       sess.muted = false;
-      await msg.reply('Asistentul a fost reactivat. Cum vă pot ajuta?');
+      await msg.reply('Asistentul a fost reactivat.');
       return;
     }
     if (lower.includes('noua') || lower.includes('nouă')) {
@@ -241,48 +226,40 @@ client.on('message', async (msg) => {
     }
     if (sess.muted) return;
 
-    // --- SSS & site (her zaman önce) ---
     for (const f of faqMap) {
       if (includesAny(lower, f.keys)) {
         await msg.reply(f.reply);
-        // akış varsa kaldığı soruyu tekrar hatırlat
         const q = currentQuestion(sess);
         if (q) await msg.reply(q);
         return;
       }
     }
 
-    // --- Onay bekleniyor mu? ---
     if (sess.awaitingConfirm) {
       if (lower === 'da') {
         sess.awaitingConfirm = false;
-        await msg.reply('Mulțumim! Comanda a fost înregistrată. Veți primi livrarea în 7–10 zile lucrătoare.');
-        // burada isterseniz siparişi bir webhook/Google Sheet/Shopify’a gönderin
-        sessions.delete(chatId); // akışı sıfırla (yeni sipariş için)
+        await msg.reply('Mulțumim! Comanda a fost înregistrată.');
+        sessions.delete(chatId);
         return;
       }
       if (lower.startsWith('modific')) {
-        // en çok değiştirilen alanlara küçük kısayol yazabilirsiniz, şimdilik baştan soralım
-        sess.stepIndex = 2; // beden adımına dönmek isterseniz değiştirebilirsiniz
+        sess.stepIndex = 2;
         sess.awaitingConfirm = false;
-        await msg.reply('Ce doriți să modificați? Reluăm de la mărime.');
+        await msg.reply('Reluăm de la mărime.');
         await msg.reply(ORDER_STEPS[sess.stepIndex].question);
         return;
       }
-      await msg.reply('Te rog răspunde cu „DA” pentru confirmare sau „MODIFIC”.');
+      await msg.reply('Te rog răspunde cu „DA” sau „MODIFIC”.');
       return;
     }
 
-    // --- Sipariş akışı içinde miyiz? ---
     if (sess.stepIndex < ORDER_STEPS.length) {
       const v = validateAndFill(sess, text);
       if (!v.ok) {
         await msg.reply(v.msg || 'Te rog răspunde corect.');
         return;
       }
-      // adım başarıyla geçtiyse sıradaki soru / veya özet
       if (sess.awaitingConfirm) {
-        // adımlar bitti → özet ver
         await msg.reply(orderSummary(sess));
         return;
       } else {
@@ -291,7 +268,6 @@ client.on('message', async (msg) => {
       }
     }
 
-    // --- Akışta değilse: AI fallback ---
     const phoneFromWp = chatId.split('@')[0];
     const injected = `${text}\n(Număr WhatsApp: ${phoneFromWp})`;
     const reply = await askAI(chatId, injected);
@@ -299,7 +275,7 @@ client.on('message', async (msg) => {
 
   } catch (err) {
     console.error('❌ Hata:', err);
-    try { await msg.reply('Ne pare rău, a apărut o eroare temporară. Încercați din nou.'); } catch {}
+    try { await msg.reply('Eroare temporară.'); } catch {}
   }
 });
 
@@ -321,5 +297,4 @@ app.get('/', (_req, res) => res.send('WhatsApp AI bot aktiv ✅'));
 
 app.listen(PORT, () => console.log(`HTTP portu: ${PORT}`));
 
-// --- Bot Başlat ---
 client.initialize();
