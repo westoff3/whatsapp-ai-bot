@@ -1,6 +1,6 @@
-// === WhatsApp + OpenAI AI Sales Bot (ESM) ===
+// === WhatsApp + OpenAI AI Sales Bot (ESM - AI ONLY) ===
 // Çalışma Ortamı: Railway / Node 18+
-// Gerekli ENV: OPENAI_API_KEY
+// ENV: OPENAI_API_KEY
 // Opsiyonel ENV: STORE_NAME
 
 import pkg from 'whatsapp-web.js';
@@ -13,12 +13,12 @@ import QRCode from 'qrcode';
 
 // --- Global ---
 let lastQr = null;
-const sessions = new Map(); // chatId -> {muted, history, stepIndex, order, awaitingConfirm}
+const sessions = new Map(); // chatId -> { muted, history }
 const PORT = process.env.PORT || 3000;
 
 // --- WhatsApp Client ---
 const client = new Client({
-  authStrategy: new LocalAuth(),
+  authStrategy: new LocalAuth(), // dosyaya kaydeder; restartta QR istemez
   puppeteer: {
     headless: true,
     executablePath:
@@ -32,151 +32,52 @@ const client = new Client({
 // --- OpenAI ---
 const ai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// --- SSS (TR tetik / RO yanıt) ---
+// --- Hızlı SSS (TR tetik / RO yanıt) ---
 const faqMap = [
   { keys: ['fiyat','ucret','ücret','price','preț'], reply: 'Prețuri: 1 pereche 179,90 LEI; 2 perechi 279,90 LEI. Transport gratuit, plată la livrare.' },
-  { keys: ['iade','geri','return','retur'], reply: 'Retur în 14 zile calendaristice. Produs neutilizat și ambalajul intact.' },
-  { keys: ['teslim','kargo','ne zaman','kaç günde','zaman','livrare','cât durează'], reply: 'Livrarea: 7–10 zile lucrătoare. Transport gratuit.' },
+  { keys: ['iade','geri','return','retur'],       reply: 'Retur în 14 zile calendaristice. Produs neutilizat și ambalaj intact.' },
+  { keys: ['teslim','kargo','ne zaman','kaç günde','zaman','livrare','cât durează'], reply: 'Livrarea durează 7–10 zile lucrătoare. Transport gratuit.' },
   { keys: ['iban','havale','eft','banka','transfer'], reply: 'Plata la livrare (COD). Transfer bancar nu este necesar.' },
-  { keys: ['site','website','link','adres'], reply: 'Site-ul nostru: https://pellvero.com/' },
+  { keys: ['site','website','link','adres'],       reply: 'Site-ul nostru: https://pellvero.com/' },
 ];
 
-// --- Manuel Sipariş Adımları ---
-const SIZES = ['35','36','37','38','39','40','41','42','43','44','45','46'];
-const COLORS = ['negru','maro'];
-const ORDER_STEPS = [
-  { key: 'name',     question: 'Vă rog să-mi spuneți numele complet (prenume + nume).' },
-  { key: 'address',  question: 'Care este adresa completă (stradă, număr, apartament, cod poștal, oraș)?' },
-  { key: 'size',     question: `Ce mărime doriți? (${SIZES.join(', ')})` },
-  { key: 'color',    question: `Ce culoare preferați? (${COLORS.join(' / ')})` },
-  { key: 'quantity', question: 'Câte perechi doriți? (1 sau 2)' }
-];
-
-// --- Session Başlatma ---
+// --- Session bootstrap ---
 function bootstrap(chatId) {
   if (!sessions.has(chatId)) {
     const storeName = process.env.STORE_NAME || 'Pellvero';
     const systemPrompt = `
-Ești un asistent de vânzări pentru magazinul online românesc "${storeName}".
-Răspunde DOAR în română, scurt și politicos (max 5 rânduri).
-Dacă utilizatorul pune întrebări generale (preț, livrare, retur), răspunde concis.
-În rest, conversația este gestionată de un flux de comandă separat.
+Ești un asistent de vânzări pe WhatsApp pentru magazinul online românesc "${storeName}".
+• Răspunde DOAR în română, scurt și politicos (max 5 rânduri).
+• Finalitatea este plasarea unei comenzi cu plată la livrare (COD).
+• NU cere numărul de telefon: folosește numărul WhatsApp furnizat în context (vezi "Număr WhatsApp").
+• Când clientul dorește să comande, adună: nume complet, adresă completă (stradă, număr, apartament, cod poștal, oraș), mărime încălțăminte, culoare, cantitate.
+• După ce ai suficiente informații, trimite un REZUMAT CLAR și cere confirmarea cu „DA” sau instrucțiuni de modificare („MODIFIC”), fără a inventa detalii.
+• Prețuri: 1 pereche 179,90 LEI; 2 perechi 279,90 LEI. Transport gratuit. Livrare: 7–10 zile lucrătoare.
+• Dacă utilizatorul pune întrebări (preț, livrare, retur, IBAN), răspunde întâi la întrebare, apoi ghidează înapoi spre plasarea comenzii.
 `.trim();
 
     sessions.set(chatId, {
       muted: false,
-      history: [{ role: 'system', content: systemPrompt }],
-      stepIndex: 0,
-      awaitingConfirm: false,
-      order: {
-        phone: chatId.split('@')[0],
-        name: '',
-        address: '',
-        size: '',
-        color: '',
-        quantity: ''
-      }
+      history: [{ role: 'system', content: systemPrompt }]
     });
   }
   return sessions.get(chatId);
 }
 
-// --- Yardımcılar ---
-function includesAny(haystack, keys) {
-  const t = haystack.toLowerCase();
-  return keys.some(k => t.includes(k));
-}
-
-function currentQuestion(sess) {
-  if (sess.awaitingConfirm) return null;
-  if (sess.stepIndex < ORDER_STEPS.length) {
-    return ORDER_STEPS[sess.stepIndex].question;
-  }
-  return null;
-}
-
-function validateAndFill(sess, text) {
-  const o = sess.order;
-  const step = ORDER_STEPS[sess.stepIndex]?.key;
-
-  if (step === 'name') {
-    const words = text.trim().split(/\s+/);
-    if (words.length >= 2 && words.join(' ').length >= 5) {
-      o.name = words.map(w => w[0]?.toUpperCase()+w.slice(1)).join(' ');
-      sess.stepIndex++;
-      return { ok: true };
-    }
-    return { ok: false, msg: 'Te rog numele și prenumele (două cuvinte).' };
-  }
-
-  if (step === 'address') {
-    if (text.trim().length < 12) {
-      return { ok: false, msg: 'Adresa pare incompletă.' };
-    }
-    o.address = text.trim();
-    sess.stepIndex++;
-    return { ok: true };
-  }
-
-  if (step === 'size') {
-    const m = text.match(/\b(3[5-9]|4[0-6])\b/);
-    if (!m) return { ok: false, msg: `Te rog alege o mărime validă: ${SIZES.join(', ')}` };
-    o.size = m[0];
-    sess.stepIndex++;
-    return { ok: true };
-  }
-
-  if (step === 'color') {
-    const low = text.toLowerCase();
-    const tr2ro = { siyah: 'negru', kahverengi: 'maro', siyahı: 'negru', kahverengı: 'maro' };
-    let color = COLORS.find(c => low.includes(c));
-    if (!color) {
-      for (const [tr, ro] of Object.entries(tr2ro)) {
-        if (low.includes(tr)) { color = ro; break; }
-      }
-    }
-    if (!color) return { ok: false, msg: `Te rog alege o culoare: ${COLORS.join(' / ')}` };
-    o.color = color;
-    sess.stepIndex++;
-    return { ok: true };
-  }
-
-  if (step === 'quantity') {
-    const m = text.match(/\b[12]\b/);
-    if (!m) return { ok: false, msg: 'Te rog scrie 1 sau 2.' };
-    o.quantity = m[0];
-    sess.awaitingConfirm = true;
-    return { ok: true };
-  }
-
-  return { ok: false };
-}
-
-function orderSummary(sess) {
-  const o = sess.order;
-  const total = o.quantity === '2' ? '279,90 LEI' : '179,90 LEI';
-  return (
-`🛒 Rezumat comandă:
-- Nume: ${o.name}
-- Adresă: ${o.address}
-- Telefon: +${o.phone}
-- Perechi: ${o.quantity}
-- Mărime: ${o.size}
-- Culoare: ${o.color}
-- Total: ${total}
-- Livrare: 7–10 zile lucrătoare, transport gratuit, plată la livrare.
-
-Confirmați cu „DA” sau scrieți „MODIFIC”.`
-  );
-}
-
-// --- AI ---
-async function askAI(chatId, text) {
+// --- AI çağrısı ---
+async function askAI(chatId, userText) {
   const sess = bootstrap(chatId);
+
+  // Konu çok büyümesin
   if (sess.history.length > 24) {
     sess.history = [sess.history[0], ...sess.history.slice(-12)];
   }
-  sess.history.push({ role: 'user', content: text });
+
+  const phone = chatId.split('@')[0]; // WhatsApp’ta kayıtlı numara
+  // Her mesajda AI’ye numarayı görünür veriyoruz
+  const meta = `Număr WhatsApp: +${phone}`;
+
+  sess.history.push({ role: 'user', content: `${userText}\n\n(${meta})` });
 
   const res = await ai.chat.completions.create({
     model: 'gpt-4o-mini',
@@ -193,7 +94,7 @@ async function askAI(chatId, text) {
 client.on('qr', (qr) => {
   lastQr = qr;
   qrcode.generate(qr, { small: true });
-  console.log('🔑 QR hazır. WhatsApp > Bağlı Cihazlar > Tara.');
+  console.log('🔑 QR hazır. WhatsApp > Bağlı Cihazlar > Cihaz Bağla ile tara.');
 });
 
 client.on('ready', () => {
@@ -206,80 +107,51 @@ client.on('message', async (msg) => {
     const chatId = msg.from;
     const text = (msg.body || '').trim();
     const lower = text.toLowerCase();
+
     const sess = bootstrap(chatId);
 
+    // Kontrol komutları
     if (lower === 'operator') {
       sess.muted = true;
-      await msg.reply('Vă conectăm cu un operator.');
+      await msg.reply('Vă conectăm cu un operator. Mulțumim!');
       return;
     }
     if (lower === 'bot') {
       sess.muted = false;
-      await msg.reply('Asistentul a fost reactivat.');
+      await msg.reply('Asistentul a fost reactivat. Cum vă pot ajuta?');
       return;
     }
     if (lower.includes('noua') || lower.includes('nouă')) {
+      // Yeni diyalog isterse hafızayı sıfırla
       sessions.delete(chatId);
-      const s2 = bootstrap(chatId);
-      await msg.reply('Începem o nouă comandă. ' + ORDER_STEPS[0].question);
+      bootstrap(chatId);
+      await msg.reply('Începem o nouă discuție. Cu ce vă pot ajuta?');
       return;
     }
     if (sess.muted) return;
 
+    // Hızlı SSS
     for (const f of faqMap) {
-      if (includesAny(lower, f.keys)) {
+      if (f.keys.some(k => lower.includes(k))) {
         await msg.reply(f.reply);
-        const q = currentQuestion(sess);
-        if (q) await msg.reply(q);
+        // Ardından AI akışına bırakıyoruz (kısa bir yönlendirme yapsın)
+        const hint = 'Te pot ajuta să plasezi comanda. Doriți să continuăm?';
+        await msg.reply(hint);
         return;
       }
     }
 
-    if (sess.awaitingConfirm) {
-      if (lower === 'da') {
-        sess.awaitingConfirm = false;
-        await msg.reply('Mulțumim! Comanda a fost înregistrată.');
-        sessions.delete(chatId);
-        return;
-      }
-      if (lower.startsWith('modific')) {
-        sess.stepIndex = 2;
-        sess.awaitingConfirm = false;
-        await msg.reply('Reluăm de la mărime.');
-        await msg.reply(ORDER_STEPS[sess.stepIndex].question);
-        return;
-      }
-      await msg.reply('Te rog răspunde cu „DA” sau „MODIFIC”.');
-      return;
-    }
-
-    if (sess.stepIndex < ORDER_STEPS.length) {
-      const v = validateAndFill(sess, text);
-      if (!v.ok) {
-        await msg.reply(v.msg || 'Te rog răspunde corect.');
-        return;
-      }
-      if (sess.awaitingConfirm) {
-        await msg.reply(orderSummary(sess));
-        return;
-      } else {
-        await msg.reply(ORDER_STEPS[sess.stepIndex].question);
-        return;
-      }
-    }
-
-    const phoneFromWp = chatId.split('@')[0];
-    const injected = `${text}\n(Număr WhatsApp: ${phoneFromWp})`;
-    const reply = await askAI(chatId, injected);
+    // AI'ye gönder
+    const reply = await askAI(chatId, text);
     if (reply) await msg.reply(reply);
 
   } catch (err) {
     console.error('❌ Hata:', err);
-    try { await msg.reply('Eroare temporară.'); } catch {}
+    try { await msg.reply('Ne pare rău, a apărut o eroare temporară. Încercați din nou.'); } catch {}
   }
 });
 
-// --- Express Keepalive ---
+// --- Express Keepalive & QR ---
 const app = express();
 
 app.get('/qr', async (_req, res) => {
