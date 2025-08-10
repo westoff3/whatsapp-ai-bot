@@ -20,7 +20,7 @@ ENV CHROME_PATH=/usr/bin/chromium
 
 WORKDIR /app
 COPY package*.json ./
-RUN npm ci --only=production
-COPY . .
+# lock dosyası gerekmesin, dev bağımlılıkları kurulmasın
+RUN npm install --omit=dev --no-audit --no-fund --legacy-peer-deps
 
 CMD ["node", "index.js"]
