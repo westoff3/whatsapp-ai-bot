@@ -67,7 +67,7 @@ function scheduleIdleReminder(chatId) {
   const t = setTimeout(async () => {
     try {
       const sess = sessions.get(chatId);
-      if (!sess || sess.muted || sess.stopReminders) return; // << yalnız "DA" sonrası durur
+      if (!sess || sess.muted || sess.stopReminders) return; // sadece "DA" sonrası durur
       await client.sendMessage(
         chatId,
         'Doriți să finalizăm comanda? Dacă aveți detaliile pregătite, îmi puteți scrie numele complet (prenume + nume), adresa, mărimea (EU 40–44), culoarea (negru/maro) și cantitatea (1 sau 2).'
@@ -81,7 +81,7 @@ function scheduleIdleReminder(chatId) {
 function bootstrap(chatId) {
   if (!sessions.has(chatId)) {
     const storeName = process.env.STORE_NAME || 'Pellvero';
-    const systemPrompt = 
+    const systemPrompt = `
 Ești un asistent de vânzări pe WhatsApp pentru magazinul online românesc "${storeName}".
 • Răspunde DOAR în română, scurt și politicos (max 5 rânduri).
 • Scop: finalizează comenzi cu plată la livrare (COD).
@@ -97,12 +97,12 @@ REGULI STRICTE:
 8) NU trimite rezumatul până nu ai simultan: nume complet, adresă completă, mărime, culoare(-i) și cantitate. Spune explicit ce lipsește (doar lipsa).
 9) Rezumatul final va include: nume, adresă, **telefonul ales**, perechi, mărime, culoare(-i), total (1=179,90 LEI; 2=279,90 LEI), livrare 7–10 zile, transport gratuit. Cere confirmare cu «DA» sau «MODIFIC».
 10) La întrebări generale (preț, livrare, retur, IBAN) răspunde întâi scurt, apoi readu discuția către plasarea comenzii cu lista scurtă de câmpuri lipsă.
-.trim();
+`.trim();
 
     sessions.set(chatId, {
       muted: false,
       history: [{ role: 'system', content: systemPrompt }],
-      stopReminders: false // << eklendi
+      stopReminders: false
     });
   }
   return sessions.get(chatId);
@@ -118,15 +118,15 @@ async function askAI(chatId, userText) {
 
   // WhatsApp numarası
   const phoneWp = chatId.split('@')[0];
-  let meta = Număr WhatsApp: +${phoneWp};
+  let meta = `Număr WhatsApp: +${phoneWp}`;
 
   // Kullanıcı metninden farklı bir telefon geldiyse meta'ya açıkça yaz
   const phoneProvided = pickPhone(userText);
   if (phoneProvided) {
-    meta +=  | Client a oferit telefon: ${phoneProvided} (folosește acesta în rezumat);
+    meta += ` | Client a oferit telefon: ${phoneProvided} (folosește acesta în rezumat)`;
   }
 
-  sess.history.push({ role: 'user', content: ${userText}\n\n(${meta}) });
+  sess.history.push({ role: 'user', content: `${userText}\n\n(${meta})` });
 
   const res = await ai.chat.completions.create({
     model: 'gpt-4o-mini',
@@ -234,6 +234,6 @@ app.get('/qr', async (_req, res) => {
 
 app.get('/', (_req, res) => res.send('WhatsApp AI bot aktiv ✅'));
 
-app.listen(PORT, () => console.log(HTTP portu: ${PORT}));
+app.listen(PORT, () => console.log(`HTTP portu: ${PORT}`));
 
 client.initialize();
