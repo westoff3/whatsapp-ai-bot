@@ -41,19 +41,41 @@ const faqMap = [
   { keys: ['site','website','link','adres'],       reply: 'Site-ul nostru: https://pellvero.com/' },
 ];
 
+// --- küçük yardımcı: sohbet içinden telefon yakala ---
+function pickPhone(text) {
+  const digits = (text || '').replace(/\D+/g, '');
+  // Romanya: +40/40/07 ile başlayan tipikler
+  // örn: +40722xxxxxx, 0722xxxxxx, 40722xxxxxx
+  const m =
+    digits.match(/^4?07\d{8}$/) ||  // 407xxxxxxxx veya 07xxxxxxxx
+    digits.match(/^4?0\d{9}$/);     // 40xxxxxxxxx (geniş tolerans)
+  if (!m) return null;
+
+  let core = m[0];
+  // normalize -> +40XXXXXXXXX
+  core = core.replace(/^0/, '40');      // 07 -> 407
+  core = core.startsWith('40') ? core : ('40' + core);
+  return '+' + core;
+}
+
 // --- Session bootstrap ---
 function bootstrap(chatId) {
   if (!sessions.has(chatId)) {
     const storeName = process.env.STORE_NAME || 'Pellvero';
     const systemPrompt = `
 Ești un asistent de vânzări pe WhatsApp pentru magazinul online românesc "${storeName}".
-• Răspunde DOAR în română, scurt și politicos (max 5 rânduri).
-• Finalitatea este plasarea unei comenzi cu plată la livrare (COD).
-• NU cere numărul de telefon: folosește numărul WhatsApp furnizat în context (vezi "Număr WhatsApp").
-• Când clientul dorește să comande, adună: nume complet, adresă completă (stradă, număr, apartament, cod poștal, oraș), mărime încălțăminte, culoare, cantitate.
-• După ce ai suficiente informații, trimite un REZUMAT CLAR și cere confirmarea cu „DA” sau instrucțiuni de modificare („MODIFIC”), fără a inventa detalii.
-• Prețuri: 1 pereche 179,90 LEI; 2 perechi 279,90 LEI. Transport gratuit. Livrare: 7–10 zile lucrătoare.
-• Dacă utilizatorul pune întrebări (preț, livrare, retur, IBAN), răspunde întâi la întrebare, apoi ghidează înapoi spre plasarea comenzii.
+Răspunde DOAR în română, scurt și politicos (max 5 rânduri).
+Scop: finalizează comenzi COD.
+
+Reguli stricte:
+1) Nu cere telefon. Folosește "Număr WhatsApp" furnizat în context. Dacă clientul oferă în text un telefon nou, FOLOSEȘTE acel telefon în locul celui din WhatsApp și confirmă pe scurt.
+2) Nume complet: trebuie să fie minim 2 cuvinte (ex. "Ion Popescu"). Dacă pare un singur cuvânt, cere politicos numele complet.
+3) Adresa completă: stradă, număr, apartament (dacă există), cod poștal, oraș/județ. Dacă lipsește ceva important, cere fix acel detaliu.
+4) Mărime: EU 35–46. 5) Culoare: negru sau maro. 6) Cantitate: 1 sau 2.
+7) Clientul poate scrie amestecat (ex: "2 43 negru"). Înțelege și extrage.
+8) NU trimite rezumat până nu ai: nume complet, adresă completă, mărime, culoare și cantitate. Dacă lipsește ceva, spune explicit ce lipsește și întreabă doar acel detaliu.
+9) Rezumatul final să includă: nume, adresă, telefon ales, perechi, mărime, culoare, total (1=179,90 LEI; 2=279,90 LEI), livrare 7–10 zile, transport gratuit. Cere confirmare cu «DA» sau «MODIFIC».
+10) La întrebări (preț, livrare, retur, IBAN) răspunde întâi la întrebare, apoi ghidează înapoi spre plasarea comenzii.
 `.trim();
 
     sessions.set(chatId, {
@@ -73,9 +95,15 @@ async function askAI(chatId, userText) {
     sess.history = [sess.history[0], ...sess.history.slice(-12)];
   }
 
-  const phone = chatId.split('@')[0]; // WhatsApp’ta kayıtlı numara
-  // Her mesajda AI’ye numarayı görünür veriyoruz
-  const meta = `Număr WhatsApp: +${phone}`;
+  // WhatsApp numarası
+  const phoneWp = chatId.split('@')[0];
+  let meta = `Număr WhatsApp: +${phoneWp}`;
+
+  // Kullanıcı metninden farklı bir telefon geldiyse meta'ya açıkça yaz
+  const phoneProvided = pickPhone(userText);
+  if (phoneProvided) {
+    meta += ` | Client a oferit telefon: ${phoneProvided} (folosește acesta în rezumat)`;
+  }
 
   sess.history.push({ role: 'user', content: `${userText}\n\n(${meta})` });
 
@@ -122,7 +150,6 @@ client.on('message', async (msg) => {
       return;
     }
     if (lower.includes('noua') || lower.includes('nouă')) {
-      // Yeni diyalog isterse hafızayı sıfırla
       sessions.delete(chatId);
       bootstrap(chatId);
       await msg.reply('Începem o nouă discuție. Cu ce vă pot ajuta?');
@@ -134,9 +161,7 @@ client.on('message', async (msg) => {
     for (const f of faqMap) {
       if (f.keys.some(k => lower.includes(k))) {
         await msg.reply(f.reply);
-        // Ardından AI akışına bırakıyoruz (kısa bir yönlendirme yapsın)
-        const hint = 'Te pot ajuta să plasezi comanda. Doriți să continuăm?';
-        await msg.reply(hint);
+        await msg.reply('Doriți să continuăm cu plasarea comenzii?');
         return;
       }
     }
