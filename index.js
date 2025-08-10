@@ -13,13 +13,13 @@ import QRCode from 'qrcode';
 
 // --- Global ---
 let lastQr = null;
-const sessions = new Map();   // chatId -> { muted, history, stopReminders }
+const sessions = new Map();   // chatId -> { muted, history, stopReminders, missingFields }
 const idleTimers = new Map(); // chatId -> timeoutId (1 dk hatırlatma)
 const PORT = process.env.PORT || 3000;
 
 // --- WhatsApp Client ---
 const client = new Client({
-  authStrategy: new LocalAuth(), // dosyaya kaydeder; restartta QR istemez
+  authStrategy: new LocalAuth(),
   puppeteer: {
     headless: true,
     executablePath:
@@ -44,21 +44,56 @@ const faqMap = [
 
 // --- Kimlik soruları (bot musun / insan mısın) kısa yanıtları ---
 const identityMap = [
-  { keys: ['bot musun','robot','yapay zek','ai misin','insan mısın','eşti bot','esti bot','ești om','esti om','sunteți om'], 
+  { keys: ['bot musun','robot','yapay zek','ai misin','insan mısın','eşti bot','esti bot','ești om','esti om','sunteți om'],
     reply: 'Sunt asistent virtual al magazinului. Îți răspund rapid și politicos, iar dacă e nevoie te pot conecta la un operator uman.' }
 ];
 
-// --- küçük yardımcı: sohbet içinden telefon yakala ---
+// --- yardımcılar ---
 function pickPhone(text) {
   const digits = (text || '').replace(/\D+/g, '');
   const m =
-    digits.match(/^4?07\d{8}$/) ||  // 407xxxxxxxx veya 07xxxxxxxx
-    digits.match(/^4?0\d{9}$/);     // 40xxxxxxxxx
+    digits.match(/^4?07\d{8}$/) ||
+    digits.match(/^4?0\d{9}$/);
   if (!m) return null;
   let core = m[0];
   core = core.replace(/^0/, '40');
   core = core.startsWith('40') ? core : ('40' + core);
   return '+' + core;
+}
+
+// AI’dan gelen metindeki [MISSING: ...] etiketini oku
+function extractMissing(reply) {
+  const m = reply.match(/\[MISSING:([^\]]+)\]\s*$/i);
+  if (!m) return null;
+  const keys = m[1].split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+  return keys;
+}
+
+// RO hatırlatma metni üret (yalnız eksikleri iste)
+const labels = {
+  nume: 'numele complet (prenume + nume)',
+  adresa: 'adresa completă (stradă, număr, apartament, oraș/județ)',
+  cod_postal: 'COD POȘTAL',
+  marime: 'mărimea (EU 40–44)',
+  culoare: 'culoarea (negru/maro)',
+  cantitate: 'cantitatea (1 sau 2)'
+};
+function roJoin(keys) {
+  const arr = keys.map(k => labels[k] || k);
+  if (arr.length <= 1) return arr[0] || '';
+  return arr.slice(0, -1).join(', ') + ' și ' + arr.slice(-1);
+}
+function buildReminderText(missing) {
+  const ks = missing.filter(k => k !== 'none');
+  if (!ks.length) {
+    return 'Doriți să finalizăm comanda? Spuneți-mi dacă doriți să confirmăm detaliile.';
+  }
+  // Özel kısaltma: sadece culoare+cantitate kaldıysa daha net yaz
+  const onlyColorQty = ks.length === 2 && ks.includes('culoare') && ks.includes('cantitate');
+  if (onlyColorQty) {
+    return 'Te rog să confirmi culoarea (negru sau maro) și cantitatea (1 sau 2). Mulțumesc!';
+  }
+  return `Te rog să îmi oferi ${roJoin(ks)}. Mulțumesc!`;
 }
 
 // --- 1 dk idle hatırlatma ---
@@ -67,11 +102,9 @@ function scheduleIdleReminder(chatId) {
   const t = setTimeout(async () => {
     try {
       const sess = sessions.get(chatId);
-      if (!sess || sess.muted || sess.stopReminders) return; // sadece "DA" sonrası durur
-      await client.sendMessage(
-        chatId,
-        'Doriți să finalizăm comanda? Dacă aveți detaliile pregătite, îmi puteți scrie numele complet (prenume + nume), adresa, mărimea (EU 40–44), culoarea (negru/maro) și cantitatea (1 sau 2).'
-      );
+      if (!sess || sess.muted || sess.stopReminders) return;
+      const msgText = buildReminderText(Array.isArray(sess.missingFields) ? sess.missingFields : ['nume','adresa','cod_postal','marime','culoare','cantitate']);
+      await client.sendMessage(chatId, msgText);
     } catch {}
   }, 60_000);
   idleTimers.set(chatId, t);
@@ -97,12 +130,20 @@ REGULI STRICTE:
 8) NU trimite rezumatul până nu ai simultan: nume complet, adresă completă, mărime, culoare(-i) și cantitate. Spune explicit ce lipsește (doar lipsa).
 9) Rezumatul final va include: nume, adresă, **telefonul ales**, perechi, mărime, culoare(-i), total (1=179,90 LEI; 2=279,90 LEI), livrare 7–10 zile, transport gratuit. Cere confirmare cu «DA» sau «MODIFIC».
 10) La întrebări generale (preț, livrare, retur, IBAN) răspunde întâi scurt, apoi readu discuția către plasarea comenzii cu lista scurtă de câmpuri lipsă.
+
+FORMAT TEHNIC OBLIGATORIU:
+- La FINALUL fiecărui răspuns, adaugă o linie doar pentru sistem în acest format exact:
+  [MISSING: nume,adresa,cod_postal,marime,culoare,cantitate]
+  • Include DOAR câmpurile care lipsesc; dacă nu lipsește nimic, scrie: [MISSING: none]
+- Nu face referire la această linie în textul pentru client.
 `.trim();
 
     sessions.set(chatId, {
       muted: false,
       history: [{ role: 'system', content: systemPrompt }],
-      stopReminders: false
+      stopReminders: false,
+      // başlangıçta her şey eksik varsay
+      missingFields: ['nume','adresa','cod_postal','marime','culoare','cantitate']
     });
   }
   return sessions.get(chatId);
@@ -134,7 +175,15 @@ async function askAI(chatId, userText) {
     messages: sess.history
   });
 
-  const reply = res.choices?.[0]?.message?.content?.trim() || '';
+  let reply = res.choices?.[0]?.message?.content || '';
+  // 1) MISSING etiketini oku ve state'e yaz
+  const missing = extractMissing(reply);
+  if (missing && missing.length) {
+    sess.missingFields = missing;
+  }
+  // 2) Bu meta satırı müşteriye gösterme
+  reply = reply.replace(/\s*\[MISSING:[^\]]+\]\s*$/i, '').trim();
+
   sess.history.push({ role: 'assistant', content: reply });
   return reply;
 }
@@ -159,7 +208,7 @@ client.on('message', async (msg) => {
 
     const sess = bootstrap(chatId);
 
-    // Yalnızca "DA" gelince dürtmeyi kalıcı kes
+    // Sadece "DA" onayı gelince dürtmeyi kalıcı kes
     if (/^\s*da\s*$/i.test(text)) {
       sess.stopReminders = true;
       clearTimeout(idleTimers.get(chatId));
@@ -185,11 +234,11 @@ client.on('message', async (msg) => {
     }
     if (sess.muted) return;
 
-    // Kimlik soruları (bot musun / insan mısın)
+    // Kimlik soruları
     for (const m of identityMap) {
       if (m.keys.some(k => lower.includes(k))) {
         await msg.reply(m.reply);
-        scheduleIdleReminder(chatId);
+        if (!sessions.get(chatId).stopReminders) scheduleIdleReminder(chatId);
         return;
       }
     }
@@ -199,6 +248,7 @@ client.on('message', async (msg) => {
       if (f.keys.some(k => lower.includes(k))) {
         await msg.reply(f.reply);
         await msg.reply('Doriți să continuăm cu plasarea comenzii? Vă rog numele complet (prenume + nume), adresa, mărimea (EU 40–44), culoarea (negru/maro) și cantitatea (1 sau 2).');
+        // SSS sonrası henüz alanlar yoksa default eksikler kalsın
         if (!sessions.get(chatId).stopReminders) scheduleIdleReminder(chatId);
         return;
       }
@@ -208,7 +258,6 @@ client.on('message', async (msg) => {
     const reply = await askAI(chatId, text);
     if (reply) {
       await msg.reply(reply);
-      // Her cevaptan sonra 1 dk içinde yanıt gelmezse kibar hatırlatma
       if (!sessions.get(chatId).stopReminders) scheduleIdleReminder(chatId);
     }
 
