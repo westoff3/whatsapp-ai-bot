@@ -13,7 +13,8 @@ import QRCode from 'qrcode';
 
 // --- Global ---
 let lastQr = null;
-const sessions = new Map(); // chatId -> { muted, history }
+const sessions = new Map();   // chatId -> { muted, history }
+const idleTimers = new Map(); // chatId -> timeoutId (1 dk hatırlatma)
 const PORT = process.env.PORT || 3000;
 
 // --- WhatsApp Client ---
@@ -44,18 +45,30 @@ const faqMap = [
 // --- küçük yardımcı: sohbet içinden telefon yakala ---
 function pickPhone(text) {
   const digits = (text || '').replace(/\D+/g, '');
-  // Romanya: +40/40/07 ile başlayan tipikler
-  // örn: +40722xxxxxx, 0722xxxxxx, 40722xxxxxx
   const m =
     digits.match(/^4?07\d{8}$/) ||  // 407xxxxxxxx veya 07xxxxxxxx
-    digits.match(/^4?0\d{9}$/);     // 40xxxxxxxxx (geniş tolerans)
+    digits.match(/^4?0\d{9}$/);     // 40xxxxxxxxx
   if (!m) return null;
-
   let core = m[0];
-  // normalize -> +40XXXXXXXXX
-  core = core.replace(/^0/, '40');      // 07 -> 407
+  core = core.replace(/^0/, '40');
   core = core.startsWith('40') ? core : ('40' + core);
   return '+' + core;
+}
+
+// --- 1 dk idle hatırlatma ---
+function scheduleIdleReminder(chatId) {
+  clearTimeout(idleTimers.get(chatId));
+  const t = setTimeout(async () => {
+    try {
+      const sess = sessions.get(chatId);
+      if (!sess || sess.muted) return;
+      await client.sendMessage(
+        chatId,
+        'Doriți să finalizăm comanda? Dacă aveți detaliile pregătite, îmi puteți scrie numele complet, adresa, mărimea (EU 40–44), culoarea (negru/maro) și cantitatea (1 sau 2).'
+      );
+    } catch {}
+  }, 60_000);
+  idleTimers.set(chatId, t);
 }
 
 // --- Session bootstrap ---
@@ -64,18 +77,20 @@ function bootstrap(chatId) {
     const storeName = process.env.STORE_NAME || 'Pellvero';
     const systemPrompt = `
 Ești un asistent de vânzări pe WhatsApp pentru magazinul online românesc "${storeName}".
-Răspunde DOAR în română, scurt și politicos (max 5 rânduri).
-Scop: finalizează comenzi COD.
+• Răspunde DOAR în română, scurt și politicos (max 5 rânduri).
+• Scop: finalizează comenzi cu plată la livrare (COD).
 
-Reguli stricte:
-1) Nu cere telefon. Folosește "Număr WhatsApp" furnizat în context. Dacă clientul oferă în text un telefon nou, FOLOSEȘTE acel telefon în locul celui din WhatsApp și confirmă pe scurt.
-2) Nume complet: trebuie să fie minim 2 cuvinte (ex. "Ion Popescu"). Dacă pare un singur cuvânt, cere politicos numele complet.
-3) Adresa completă: stradă, număr, apartament (dacă există), cod poștal, oraș/județ. Dacă lipsește ceva important, cere fix acel detaliu.
-4) Mărime: EU 35–46. 5) Culoare: negru sau maro. 6) Cantitate: 1 sau 2.
-7) Clientul poate scrie amestecat (ex: "2 43 negru"). Înțelege și extrage.
-8) NU trimite rezumat până nu ai: nume complet, adresă completă, mărime, culoare și cantitate. Dacă lipsește ceva, spune explicit ce lipsește și întreabă doar acel detaliu.
-9) Rezumatul final să includă: nume, adresă, telefon ales, perechi, mărime, culoare, total (1=179,90 LEI; 2=279,90 LEI), livrare 7–10 zile, transport gratuit. Cere confirmare cu «DA» sau «MODIFIC».
-10) La întrebări (preț, livrare, retur, IBAN) răspunde întâi la întrebare, apoi ghidează înapoi spre plasarea comenzii.
+REGULI STRICTE:
+1) NU cere telefon în mod activ. Primești în context "Număr WhatsApp". Dacă clientul oferă un număr nou în text, FOLOSEȘTE acel număr în locul celui din WhatsApp și confirmă: "Notez acest număr pentru livrare."
+2) Numele trebuie să fie NUME COMPLET (minim două cuvinte: prenume + nume). Dacă primești un singur cuvânt, cere politicos numele complet.
+3) Adresa trebuie să conțină: stradă, număr, apartament (dacă există), COD POȘTAL și oraș/județ. Dacă lipsește un element, cere FIX acel detaliu.
+4) Mărimea acceptată DOAR EU 40–44 (nu alte valori).
+5) Culori disponibile DOAR: negru sau maro.
+6) Cantitate: 1 sau 2. Dacă este 2, solicită DOUĂ culori (pot fi și identice) sau cere clar: "Doriți ambele negru, ambele maro sau una negru și una maro?".
+7) Clientul poate scrie amestecat (ex: "2 43 negru"). Înțelege și extrage informațiile utile.
+8) NU trimite rezumatul până nu ai simultan: nume complet, adresă completă, mărime (40–44), culoare(-i) și cantitate. Spune explicit ce lipsește.
+9) Rezumatul final trebuie să includă: nume, adresă, telefonul ales, perechi, mărime, culoare(-i), total (1=179,90 LEI; 2=279,90 LEI), livrare 7–10 zile, transport gratuit. Cere confirmare cu «DA» sau «MODIFIC».
+10) La întrebări generale (preț, livrare, retur, IBAN) răspunde întâi scurt, apoi readu discuția către plasarea comenzii.
 `.trim();
 
     sessions.set(chatId, {
@@ -90,7 +105,6 @@ Reguli stricte:
 async function askAI(chatId, userText) {
   const sess = bootstrap(chatId);
 
-  // Konu çok büyümesin
   if (sess.history.length > 24) {
     sess.history = [sess.history[0], ...sess.history.slice(-12)];
   }
@@ -157,18 +171,23 @@ client.on('message', async (msg) => {
     }
     if (sess.muted) return;
 
-    // Hızlı SSS
+    // SSS (önce)
     for (const f of faqMap) {
       if (f.keys.some(k => lower.includes(k))) {
         await msg.reply(f.reply);
-        await msg.reply('Doriți să continuăm cu plasarea comenzii?');
+        await msg.reply('Doriți să continuăm cu plasarea comenzii? Vă rog numele complet, adresa, mărimea (EU 40–44), culoarea (negru/maro) și cantitatea (1 sau 2).');
+        scheduleIdleReminder(chatId);
         return;
       }
     }
 
     // AI'ye gönder
     const reply = await askAI(chatId, text);
-    if (reply) await msg.reply(reply);
+    if (reply) {
+      await msg.reply(reply);
+      // Her cevaptan sonra 1 dk içinde yanıt gelmezse kibar hatırlatma
+      scheduleIdleReminder(chatId);
+    }
 
   } catch (err) {
     console.error('❌ Hata:', err);
