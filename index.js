@@ -1,7 +1,7 @@
-// === WhatsApp + OpenAI AI Sales Bot (ESM - AI ONLY) ===
+// === WhatsApp + OpenAI AI Sales Bot (ESM - AI ONLY, TR EDITION) ===
 // Çalışma Ortamı: Railway / Node 18+
 // ENV: OPENAI_API_KEY
-// Opsiyonel ENV: STORE_NAME
+// Opsiyonel ENV: STORE_NAME, OPENAI_MODEL (varsayılan gpt-4o-mini)
 
 import pkg from 'whatsapp-web.js';
 const { Client, LocalAuth } = pkg;
@@ -32,33 +32,16 @@ const client = new Client({
 
 // --- OpenAI ---
 const ai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
 
-// --- Hızlı SSS (TR tetik / RO yanıt) ---
-const faqMap = [
-  { keys: ['fiyat','ucret','ücret','price','preț'], reply: 'Prețuri: 1 pereche 179,90 LEI; 2 perechi 279,90 LEI. Transport gratuit, plată la livrare.' },
-  { keys: ['iade','geri','return','retur'],       reply: 'Retur în 14 zile calendaristice. Produs neutilizat și ambalaj intact.' },
-  { keys: ['teslim','kargo','ne zaman','kaç günde','zaman','livrare','cât durează'], reply: 'Livrarea durează 7–10 zile lucrătoare. Transport gratuit.' },
-  { keys: ['iban','havale','eft','banka','transfer'], reply: 'Plata la livrare (COD). Transfer bancar nu este necesar.' },
-  { keys: ['site','website','link','adres'],       reply: 'Site-ul nostru: https://pellvero.com/' },
-];
-
-// --- Kimlik soruları (bot musun / insan mısın) kısa yanıtları ---
-const identityMap = [
-  { keys: ['bot musun','robot','yapay zek','ai misin','insan mısın','eşti bot','esti bot','ești om','esti om','sunteți om'],
-    reply: 'Sunt asistent virtual al magazinului. Îți răspund rapid și politicos, iar dacă e nevoie te pot conecta la un operator uman.' }
-];
-
-// --- yardımcılar ---
-function pickPhone(text) {
+// --- Yardımcılar (TR) ---
+function pickPhoneTR(text) {
   const digits = (text || '').replace(/\D+/g, '');
-  const m =
-    digits.match(/^4?07\d{8}$/) ||
-    digits.match(/^4?0\d{9}$/);
-  if (!m) return null;
-  let core = m[0];
-  core = core.replace(/^0/, '40');
-  core = core.startsWith('40') ? core : ('40' + core);
-  return '+' + core;
+  // 05XXXXXXXXX | 5XXXXXXXXX | +905XXXXXXXXX | 00905XXXXXXXXX
+  const ok = /^(?:0090|90)?5\d{9}$|^0?5\d{9}$/.test(digits);
+  if (!ok) return null;
+  let core = digits.replace(/^0090/, '').replace(/^90/, '').replace(/^0/, '');
+  return '+90' + core;
 }
 
 // AI’dan gelen metindeki [MISSING: ...] etiketini oku
@@ -69,32 +52,57 @@ function extractMissing(reply) {
   return keys;
 }
 
-// RO hatırlatma metni üret (yalnız eksikleri iste)
-const labels = {
-  nume: 'numele complet (prenume + nume)',
-  adresa: 'adresa completă (stradă, număr, apartament, oraș/județ)',
-  cod_postal: 'COD POȘTAL',
-  marime: 'mărimea (EU 40–44)',
-  culoare: 'culoarea (negru/maro)',
-  cantitate: 'cantitatea (1 sau 2)'
+// Hatırlatma metni üret (yalnız eksikleri iste)
+const labelsTR = {
+  ad_soyad: 'ad soyad (iki kelime)',
+  adres: 'açık adres (mahalle/cadde, kapı/daire)',
+  ilce: 'ilçe',
+  il: 'il',
+  beden: 'numara (EU 40–44)',
+  renk: 'renk (Siyah/Taba)',
+  adet: 'adet (1 veya 2)'
 };
-function roJoin(keys) {
-  const arr = keys.map(k => labels[k] || k);
-  if (arr.length <= 1) return arr[0] || '';
-  return arr.slice(0, -1).join(', ') + ' și ' + arr.slice(-1);
+function trJoin(keys){
+  const arr = keys.map(k => labelsTR[k] || k);
+  return arr.length <= 1 ? (arr[0]||'') : arr.slice(0,-1).join(', ') + ' ve ' + arr.slice(-1);
 }
-function buildReminderText(missing) {
-  const ks = missing.filter(k => k !== 'none');
-  if (!ks.length) {
-    return 'Doriți să finalizăm comanda? Spuneți-mi dacă doriți să confirmăm detaliile.';
-  }
-  // Özel kısaltma: sadece culoare+cantitate kaldıysa daha net yaz
-  const onlyColorQty = ks.length === 2 && ks.includes('culoare') && ks.includes('cantitate');
-  if (onlyColorQty) {
-    return 'Te rog să confirmi culoarea (negru sau maro) și cantitatea (1 sau 2). Mulțumesc!';
-  }
-  return `Te rog să îmi oferi ${roJoin(ks)}. Mulțumesc!`;
+function buildReminderTextTR(missing){
+  const ks = (missing||[]).filter(k => k!=='none');
+  if (!ks.length) return 'Siparişi tamamlayalım mı? Onay verirseniz özet geçeceğim.';
+  if (ks.length===2 && ks.includes('renk') && ks.includes('adet'))
+    return 'Lütfen renk (Siyah/Taba) ve adet (1 veya 2) bilgisini yazın.';
+  return `Lütfen şu bilgileri iletin: ${trJoin(ks)}.`;
 }
+
+// --- Fiyat & Site ---
+const SITE = 'https://pellvero.com/products/klasik-erkek-ayakkabi-iki-renk-secenekli';
+const PRICE1 = '999,90 TL';
+const PRICE2 = '1.499,90 TL';
+
+// --- Hızlı SSS (TR tetik / TR yanıt) ---
+const faqMap = [
+  { keys: ['fiyat','ucret','ücret','price'], reply: `1 adet ${PRICE1}. Ücretsiz ve şeffaf kargodur efendim. Kapıda ödemelidir. Hiçbir ek ücret yoktur.` },
+  { keys: ['iki','çift','2 adet','paket','bundle'], reply: `2 adet ${PRICE2}. Ücretsiz ve şeffaf kargodur efendim. Kapıda ödemelidir. Hiçbir ek ücret yoktur.` },
+  { keys: ['teslim','kargo','ne zaman','kaç günde','zaman','süre'], reply: 'Teşekkür ederiz efendim. Ortalama 2 ila 5 iş günü içinde size ulaşacaktır.' },
+  { keys: ['görmeden','şeffaf','nasıl teslim','koli'], reply: 'Ücretsiz ve şeffaf kargodur. Kapıda ödemelidir. Ürününüzü görerek teslim alacaksınız. Görmeden ödeme yapmazsınız efendim.' },
+  { keys: ['site','website','link','adres','nereden alırım'], reply: `Siparişinizi buradan oluşturabilirsiniz efendim: ${SITE}. Kargoya verilmeden önce çağrı merkezimiz sizi arayacaktır.` },
+  { keys: ['indirim','pazarlık','düşer mi'], reply: 'İndirimli sabit barkotlu fiyatlarımızdır efendim.' },
+  { keys: ['kalıp','standart kalıp','dar mı'], reply: 'Standart kalıptır efendim.' },
+  { keys: ['numara','beden','ölçü'], reply: '40–44 numara aralığında mevcuttur efendim.' },
+  { keys: ['nereden','hangi şehir'], reply: 'Konya’dan 81 ile göndermekteyiz efendim.' },
+  { keys: ['iptal'], reply: 'İptal edilmiştir. Teşekkür eder, iyi günler dileriz efendim.' },
+  { keys: ['aynı ürün mü','farklı mı','aynı mı'], reply: 'Birebir aynı üründür. Ücretsiz ve şeffaf kargodur. Kapıda ödemelidir. Ürününüzü görerek teslim alacaksınız.' },
+  { keys: ['kart','kredi kartı','taksit'], reply: 'Tabi efendim. Kapıda kart ile ödeme yapabilirsiniz. Tek çekimdir; ardından bankanızdan taksitlendirebilirsiniz.' },
+  { keys: ['malzeme','deri','taban'], reply: 'Deridir. Kauçuk termo ortopedik tabandır efendim. %100 yerli üretimdir. Kaliteli ürünlerdir.' },
+  // İade/Değişim — talebin doğrultusunda
+  { keys: ['iade','geri','değişim','retur','return'], reply: 'Sadece Değişim mevcuttur efendim.' },
+];
+
+// --- Kimlik soruları (bot musun / insan mısın) kısa yanıtları ---
+const identityMap = [
+  { keys: ['bot musun','robot','yapay zek','ai misin','insan mısın'],
+    reply: 'Mağaza asistanıyım. Hızlı yardımcı olurum, isterseniz temsilciye de aktarabilirim.' }
+];
 
 // --- 1 dk idle hatırlatma ---
 function scheduleIdleReminder(chatId) {
@@ -103,7 +111,9 @@ function scheduleIdleReminder(chatId) {
     try {
       const sess = sessions.get(chatId);
       if (!sess || sess.muted || sess.stopReminders) return;
-      const msgText = buildReminderText(Array.isArray(sess.missingFields) ? sess.missingFields : ['nume','adresa','cod_postal','marime','culoare','cantitate']);
+      const msgText = buildReminderTextTR(Array.isArray(sess.missingFields)
+        ? sess.missingFields
+        : ['ad_soyad','adres','ilce','il','beden','renk','adet']);
       await client.sendMessage(chatId, msgText);
     } catch {}
   }, 60_000);
@@ -114,36 +124,32 @@ function scheduleIdleReminder(chatId) {
 function bootstrap(chatId) {
   if (!sessions.has(chatId)) {
     const storeName = process.env.STORE_NAME || 'Pellvero';
-    const systemPrompt = `
-Ești un asistent de vânzări pe WhatsApp pentru magazinul online românesc "${storeName}".
-• Răspunde DOAR în română, scurt și politicos (max 5 rânduri).
-• Scop: finalizează comenzi cu plată la livrare (COD).
+    const systemPromptTR = `
+${storeName} için WhatsApp satış asistanısın.
+• Yalnızca TÜRKÇE yaz ve kısa cevap ver (en fazla 5 satır).
+• Amaç: Kapıda ödeme (COD) ile siparişi tamamlama.
 
-REGULI STRICTE:
-1) NU cere telefon în mod activ. Primești în context "Număr WhatsApp". Dacă clientul oferă un număr nou în text, FOLOSEȘTE acel număr în locul celui din WhatsApp și confirmă: "Notez acest număr pentru livrare."
-2) Numele trebuie să fie NUME COMPLET: **prenume + nume** (minim două cuvinte). Dacă primești un singur cuvânt, cere politicos numele complet.
-3) Adresa TREBUIE să conțină: stradă, număr, apartament (dacă există), **COD POȘTAL**, oraș/județ. Dacă lipsește ceva, cere FIX acel detaliu; nu repeta ce avem deja.
-4) Mărime: DOAR EU **40–44** (nu alte valori). Acceptă "40 44" sau "42,43" stilinde şi clarifică pentru fiecare pereche la nevoie.
-5) Culori: DOAR **negru** sau **maro**.
-6) Cantitate: **1** sau **2**. Dacă este 2, cere clar **două culori** (pot fi identice) şi/sau două mărimi dacă clientul a dat două mărimi.
-7) Clientul poate scrie amestecat (ex: "2 43 negru"). Înțelege și extrage.
-8) NU trimite rezumatul până nu ai simultan: nume complet, adresă completă, mărime, culoare(-i) și cantitate. Spune explicit ce lipsește (doar lipsa).
-9) Rezumatul final va include: nume, adresă, **telefonul ales**, perechi, mărime, culoare(-i), total (1=179,90 LEI; 2=279,90 LEI), livrare 7–10 zile, transport gratuit. Cere confirmare cu «DA» sau «MODIFIC».
-10) La întrebări generale (preț, livrare, retur, IBAN) răspunde întâi scurt, apoi readu discuția către plasarea comenzii cu lista scurtă de câmpuri lipsă.
+KURALLAR:
+1) Telefonu proaktif isteme. WhatsApp numarasını meta’dan al. Müşteri yeni numara verirse “Bu numarayı teslimat için not aldım.” de ve onu kullan.
+2) Ad soyad en az iki kelime olmalı. Tek kelime gelirse nazikçe tam ad iste.
+3) Adres şunları içermeli: mahalle/cadde-sokak + kapı/daire, İLÇE ve İL. Posta kodu isteme.
+4) Beden yalnızca 40–44. Renk yalnızca Siyah veya Taba. Adet 1 ya da 2. 2 adet ise iki renk/iki beden bilgisini netleştir.
+5) Kullanıcı karışık yazarsa (örn: “2 43 siyah”) anla ve ayıkla.
+6) Tüm alanlar tamamlanmadan özet gönderme; yalnızca eksik olan alanları iste.
+7) Nihai özet: ad soyad, adres (ilçe/il), **seçilen telefon**, adet, beden(ler), renk(ler), toplam (1=${PRICE1}, 2=${PRICE2}), teslimat 2–5 iş günü, kargo ücretsiz ve şeffaf. Onay için “EVET”, değişiklik için “DÜZELT” iste.
 
-FORMAT TEHNIC OBLIGATORIU:
-- La FINALUL fiecărui răspuns, adaugă o linie doar pentru sistem în acest format exact:
-  [MISSING: nume,adresa,cod_postal,marime,culoare,cantitate]
-  • Include DOAR câmpurile care lipsesc; dacă nu lipsește nimic, scrie: [MISSING: none]
-- Nu face referire la această linie în textul pentru client.
+TEKNİK FORMAT:
+- Her cevabın SONUNDA sadece sistem için şu satırı ekle:
+  [MISSING: ad_soyad,adres,ilce,il,beden,renk,adet]
+  (Eksik olmayanları yazma; hiç eksik yoksa [MISSING: none]. Bu satırı müşteriye açıklama.)
 `.trim();
 
     sessions.set(chatId, {
       muted: false,
-      history: [{ role: 'system', content: systemPrompt }],
+      history: [{ role: 'system', content: systemPromptTR }],
       stopReminders: false,
       // başlangıçta her şey eksik varsay
-      missingFields: ['nume','adresa','cod_postal','marime','culoare','cantitate']
+      missingFields: ['ad_soyad','adres','ilce','il','beden','renk','adet']
     });
   }
   return sessions.get(chatId);
@@ -159,18 +165,18 @@ async function askAI(chatId, userText) {
 
   // WhatsApp numarası
   const phoneWp = chatId.split('@')[0];
-  let meta = `Număr WhatsApp: +${phoneWp}`;
+  let meta = `WhatsApp Numarası: +${phoneWp}`;
 
   // Kullanıcı metninden farklı bir telefon geldiyse meta'ya açıkça yaz
-  const phoneProvided = pickPhone(userText);
+  const phoneProvided = pickPhoneTR(userText);
   if (phoneProvided) {
-    meta += ` | Client a oferit telefon: ${phoneProvided} (folosește acesta în rezumat)`;
+    meta += ` | Müşteri yeni telefon verdi: ${phoneProvided} (özette bunu kullan)`;
   }
 
   sess.history.push({ role: 'user', content: `${userText}\n\n(${meta})` });
 
   const res = await ai.chat.completions.create({
-    model: 'gpt-4o-mini',
+    model: OPENAI_MODEL,
     temperature: 0.3,
     messages: sess.history
   });
@@ -181,7 +187,7 @@ async function askAI(chatId, userText) {
   if (missing && missing.length) {
     sess.missingFields = missing;
   }
-  // 2) Bu meta satırı müşteriye gösterme
+  // 2) Bu meta satırını müşteriye gösterme
   reply = reply.replace(/\s*\[MISSING:[^\]]+\]\s*$/i, '').trim();
 
   sess.history.push({ role: 'assistant', content: reply });
@@ -208,28 +214,28 @@ client.on('message', async (msg) => {
 
     const sess = bootstrap(chatId);
 
-    // Sadece "DA" onayı gelince dürtmeyi kalıcı kes
-    if (/^\s*da\s*$/i.test(text)) {
+    // Yalnızca "EVET" onayı gelince dürtmeyi kalıcı kes
+    if (/^\s*evet\s*$/i.test(text)) {
       sess.stopReminders = true;
       clearTimeout(idleTimers.get(chatId));
     }
 
-    // Kontrol komutları
-    if (lower === 'operator') {
+    // Kontrol komutları (TR)
+    if (lower === 'temsilci') {
       sess.muted = true;
-      await msg.reply('Vă conectăm cu un operator. Mulțumim!');
+      await msg.reply('Sizi temsilciye aktarıyoruz. Teşekkürler!');
       return;
     }
-    if (lower === 'bot') {
+    if (lower === 'bot' || lower === 'asistan') {
       sess.muted = false;
       sess.stopReminders = false; // bot yeniden açıldı → dürtmeler tekrar aktif
-      await msg.reply('Asistentul a fost reactivat. Cum vă pot ajuta?');
+      await msg.reply('Asistan yeniden aktif. Nasıl yardımcı olabilirim?');
       return;
     }
-    if (lower.includes('noua') || lower.includes('nouă')) {
+    if (lower.includes('yeni')) {
       sessions.delete(chatId);
       bootstrap(chatId);
-      await msg.reply('Începem o nouă discuție. Cu ce vă pot ajuta?');
+      await msg.reply('Yeni bir görüşme başlatıldı. Size nasıl yardımcı olalım?');
       return;
     }
     if (sess.muted) return;
@@ -247,8 +253,7 @@ client.on('message', async (msg) => {
     for (const f of faqMap) {
       if (f.keys.some(k => lower.includes(k))) {
         await msg.reply(f.reply);
-        await msg.reply('Doriți să continuăm cu plasarea comenzii? Vă rog numele complet (prenume + nume), adresa, mărimea (EU 40–44), culoarea (negru/maro) și cantitatea (1 sau 2).');
-        // SSS sonrası henüz alanlar yoksa default eksikler kalsın
+        await msg.reply('Siparişinizi tamamlayalım mı? Lütfen ad soyad, adres (ilçe/il), numara (40–44), renk (Siyah/Taba) ve adet (1 veya 2) bilgisini yazınız.');
         if (!sessions.get(chatId).stopReminders) scheduleIdleReminder(chatId);
         return;
       }
@@ -263,7 +268,7 @@ client.on('message', async (msg) => {
 
   } catch (err) {
     console.error('❌ Hata:', err);
-    try { await msg.reply('Ne pare rău, a apărut o eroare temporară. Încercați din nou.'); } catch {}
+    try { await msg.reply('Üzgünüz, geçici bir hata oluştu. Lütfen tekrar deneyin.'); } catch {}
   }
 });
 
