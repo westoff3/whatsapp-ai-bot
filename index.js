@@ -56,10 +56,13 @@ function pickPhoneTR(text) {
   let core = digits.replace(/^0090/, '').replace(/^90/, '').replace(/^0/, '');
   return '+90' + core;
 }
+
+// MODEL ETİKETLERİ OKUMA
 function extractMissing(reply) {
-  const m = reply.match(/\[MISSING:([^\]]+)\]\s*$/i);
-  if (!m) return null;
-  return m[1].split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+  const all = [...String(reply).matchAll(/\[MISSING:([^\]]+)\]/gi)];
+  if (!all.length) return null;
+  const last = all[all.length - 1][1];
+  return last.split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
 }
 function extractFields(reply){
   const m = reply.match(/\[FIELDS:\s*([^\]]*)\]/i);
@@ -228,11 +231,17 @@ async function askAI(chatId, userText) {
     saveCustomer('+'+phoneWp, { data: sess.data, order: sess.order });
   }
 
-  // son kullanıcıya teknik satırları gösterme
+  // kullanıcıya teknik satırları asla gösterme (global temizle)
   reply = reply
-    .replace(/\s*\[MISSING:[^\]]+\]\s*$/i, '')
-    .replace(/\s*\[FIELDS:[^\]]+\]\s*$/i, '')
+    .replace(/\[MISSING:[^\]]+\]/gi, '')
+    .replace(/\[FIELDS:[^\]]+\]/gi, '')
+    .replace(/^[ \t]*\n+/gm, '')
     .trim();
+
+  // model boş dökerse eksikleri iste
+  if (!reply) {
+    reply = buildReminderTextTR(Array.isArray(sess.missingFields) ? sess.missingFields : []);
+  }
 
   sess.history.push({ role: 'assistant', content: reply });
   return reply;
