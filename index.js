@@ -14,7 +14,7 @@ import QRCode from 'qrcode';
 
 // --- Global ---
 let lastQr = null;
-const sessions = new Map();   // chatId -> { muted, history, stopReminders, missingFields, sentTaba, sentSiyah }
+const sessions = new Map();   // chatId -> { muted, history, stopReminders, missingFields, sentTaba, sentSiyah, data, mode }
 const idleTimers = new Map(); // chatId -> timeoutId (1 dk hatırlatma)
 const PORT = process.env.PORT || 3000;
 
@@ -62,7 +62,7 @@ const labelsTR = {
   adres: 'açık adres (mahalle/cadde, kapı/daire)',
   ilce: 'ilçe',
   il: 'il',
-  beden: 'numara (40–44)',          // EU kaldırıldı
+  beden: 'numara (40–44)',
   renk: 'renk (Siyah/Taba)',
   adet: 'adet (1 veya 2)'
 };
@@ -142,13 +142,14 @@ ${storeName} için WhatsApp satış asistanısın.
 • Amaç: Kapıda ödeme (COD) ile siparişi tamamlama.
 
 KURALLAR:
-1) Telefonu proaktif isteme. WhatsApp numarasını meta’dan al. Müşteri yeni numara verirse “Bu numarayı teslimat için not aldım.” de ve onu kullan.
+1) Telefonu proaktif isteme. WhatsApp numarasını meta’dan al. Müşteri yeni numara verirse “Bu numarayı teslimat için not aldım.” de ve onu kullanma — sadece özette telefon alanında geçir.
 2) Ad soyad en az iki kelime olmalı. Tek kelime gelirse nazikçe tam ad iste.
 3) Adres şunları içermeli: mahalle/cadde-sokak + kapı/daire, İLÇE ve İL. Posta kodu isteme.
 4) Beden yalnızca 40–44. Renk yalnızca Siyah veya Taba. Adet 1 ya da 2. 2 adet ise iki renk/iki beden bilgisini netleştir.
 5) Kullanıcı karışık yazarsa (örn: “2 43 siyah”) anla ve ayıkla.
 6) Tüm alanlar tamamlanmadan özet gönderme; yalnızca eksik olan alanları iste.
 7) Nihai özet: ad soyad, adres (ilçe/il), **seçilen telefon**, adet, beden(ler), renk(ler), toplam (1=${PRICE1}, 2=${PRICE2}), teslimat 2–5 iş günü, kargo ücretsiz ve şeffaf. Onay için “EVET”, değişiklik için “DÜZELT” iste.
+8) Telefona dair hiçbir cümle KULLANICI METNİNDE yer almayacak. “WhatsApp numaranızı not aldım” benzeri ifadeleri KESİNLİKLE yazma. Telefon sadece özet içinde “Seçilen telefon” alanında görünebilir.
 
 TEKNİK FORMAT:
 - Her cevabın SONUNDA sadece sistem için şu satırı ekle:
@@ -162,7 +163,9 @@ TEKNİK FORMAT:
       stopReminders: false,
       missingFields: ['ad_soyad','adres','ilce','il','beden','renk','adet'],
       sentTaba: false,
-      sentSiyah: false
+      sentSiyah: false,
+      data: { ad_soyad:null, adres:null, ilce:null, il:null, beden:null, renk:null, adet:null, telefon:null },
+      mode: 'normal' // 'normal' | 'duzelt'
     });
   }
   return sessions.get(chatId);
@@ -176,14 +179,30 @@ async function askAI(chatId, userText) {
     sess.history = [sess.history[0], ...sess.history.slice(-12)];
   }
 
+  // Meta telefon belirle (gizli; sadece özet alanında kullanılacak)
   const phoneWp = chatId.split('@')[0];
-  let meta = `WhatsApp Numarası: +${phoneWp}`;
-
+  const phoneFromChat = '+' + phoneWp; // WhatsApp id
   const phoneProvided = pickPhoneTR(userText);
-  if (phoneProvided) {
-    meta += ` | Müşteri yeni telefon verdi: ${phoneProvided} (özette bunu kullan)`;
-  }
+  // Tercih: müşteri verdiği varsa onu, yoksa wp numarası
+  const selectedPhone = phoneProvided || (sess.data.telefon || phoneFromChat);
+  sess.data.telefon = selectedPhone;
 
+  // İlerleme bilgilerini her turda modele hatırlat (kullanıcıya gösterilmez)
+  const progress = `
+ELDEKİ BİLGİLER (kullanıcıya GÖSTERME):
+ad_soyad=${sess.data.ad_soyad||'-'},
+adres=${sess.data.adres||'-'}, ilce=${sess.data.ilce||'-'}, il=${sess.data.il||'-'},
+beden=${sess.data.beden||'-'}, renk=${sess.data.renk||'-'}, adet=${sess.data.adet||'-'},
+telefon=${sess.data.telefon? '(gizli)' : '-'}.
+Eksikler: ${Array.isArray(sess.missingFields)? sess.missingFields.join(',') : '-'}.
+Mod: ${sess.mode}.
+Kural: Alınmış bilgileri tekrar isteme; sadece eksikleri sor. Tüm alanlar tamamsa tek bir özet ver ve “EVET”/“DÜZELT” iste.
+`.trim();
+  sess.history.push({ role: 'system', content: progress });
+
+  // Kullanıcı mesajını (meta satırıyla) ekle
+  let meta = `WhatsApp Numarası: ${phoneFromChat}`;
+  if (phoneProvided) meta += ` | Müşteri yeni telefon verdi: ${phoneProvided} (özette bunu kullan)`;
   sess.history.push({ role: 'user', content: `${userText}\n\n(${meta})` });
 
   const res = await ai.chat.completions.create({
@@ -193,10 +212,20 @@ async function askAI(chatId, userText) {
   });
 
   let reply = res.choices?.[0]?.message?.content || '';
+
+  // MISSING alanları güncelle
   const missing = extractMissing(reply);
   if (missing && missing.length) sess.missingFields = missing;
 
+  // 2.1) Telefona dair kullanıcı metninde geçebilecek cümleleri tamamen temizle
+  reply = reply
+    .replace(/.*whatsapp\s*numara(?:s[ıi])?.*not\s*al[dıi]m.*\n?/gi, '')
+    .replace(/.*numaran[ıi]z[^\n.]*not[^\n.]*al[dıi]m.*\n?/gi, '')
+    .replace(/.*telefonunuzu[^\n.]*kay[dt][^\n.]*ettim.*\n?/gi, '');
+
+  // Sona eklenen [MISSING: ...] satırını at
   reply = reply.replace(/\s*\[MISSING:[^\]]+\]\s*$/i, '').trim();
+
   sess.history.push({ role: 'assistant', content: reply });
   return reply;
 }
@@ -221,10 +250,12 @@ client.on('message', async (msg) => {
 
     const sess = bootstrap(chatId);
 
-    // Yalnızca "EVET" onayı gelince dürtmeyi kalıcı kes
+    // "EVET" → finalize (dürtme kes, modu sıfırla)
     if (/^\s*evet\s*$/i.test(text)) {
       sess.stopReminders = true;
+      sess.mode = 'normal';
       clearTimeout(idleTimers.get(chatId));
+      // Burada isterseniz sipariş özeti teyit akışını tetikleyen ekstra mesaj atılabilir.
     }
 
     // Kontrol komutları (TR)
@@ -236,6 +267,7 @@ client.on('message', async (msg) => {
     if (lower === 'bot' || lower === 'asistan') {
       sess.muted = false;
       sess.stopReminders = false;
+      sess.mode = 'normal';
       await msg.reply('Asistan yeniden aktif. Nasıl yardımcı olabilirim?');
       return;
     }
@@ -247,6 +279,30 @@ client.on('message', async (msg) => {
       return;
     }
     if (sess.muted) return;
+
+    // — DÜZELT modu tetikleyici
+    if (/^\s*düzelt\s*$/i.test(text)) {
+      sess.mode = 'duzelt';
+      await msg.reply('Hangi bilgiyi değiştirelim? Örn: "adres: ...", "beden: 43", "renk: siyah", "adet: 2".');
+      if (!sessions.get(chatId).stopReminders) scheduleIdleReminder(chatId);
+      return;
+    }
+
+    // — DÜZELT modunda mini-parser (tek satır düzeltmeleri yakala)
+    if (sess.mode === 'duzelt') {
+      const mBeden = lower.match(/\b(40|41|42|43|44)\b/);
+      const mRenk  = text.match(/\b(siyah|taba)\b/i);
+      const mAdet  = lower.match(/\b([12])\b/);
+      if (mBeden) sess.data.beden = mBeden[1];
+      if (mRenk)  sess.data.renk  = mRenk[1].toLowerCase();
+      if (mAdet)  sess.data.adet  = mAdet[1];
+      if (lower.startsWith('adres:'))      sess.data.adres    = text.slice(6).trim();
+      if (lower.startsWith('ad soyad:') || lower.startsWith('ad-soyad:'))
+        sess.data.ad_soyad = text.split(':')[1]?.trim();
+      if (lower.startsWith('ilce:'))       sess.data.ilce     = text.split(':')[1]?.trim();
+      if (lower.startsWith('il:'))         sess.data.il       = text.split(':')[1]?.trim();
+      // Düzeltmeden sonra AI’den güncel özet isteyelim (akış devam)
+    }
 
     // — Renk teyidi görseli (bir kez gönder)
     if (/\btaba\b/i.test(lower) || /\bkahverengi\b/i.test(lower)) {
