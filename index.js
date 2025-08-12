@@ -37,8 +37,12 @@ const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
 
 // --- Ürün görselleri (isteğe bağlı yollar) ---
 let IMG_TABA = null, IMG_SIYAH = null;
-try { IMG_TABA  = MessageMedia.fromFilePath(process.env.IMG_TABA_PATH  || './media/taba.jpg'); } catch {}
-try { IMG_SIYAH = MessageMedia.fromFilePath(process.env.IMG_SIYAH_PATH || './media/siyah.jpg'); } catch {}
+try {
+  IMG_TABA  = MessageMedia.fromFilePath(process.env.IMG_TABA_PATH  || './media/taba.jpg');
+} catch {}
+try {
+  IMG_SIYAH = MessageMedia.fromFilePath(process.env.IMG_SIYAH_PATH || './media/siyah.jpg');
+} catch {}
 
 // --- Yardımcılar (TR) ---
 function pickPhoneTR(text) {
@@ -62,7 +66,7 @@ const labelsTR = {
   adres: 'açık adres (mahalle/cadde, kapı/daire)',
   ilce: 'ilçe',
   il: 'il',
-  beden: 'numara (40–44)',          // EU kaldırıldı
+  beden: 'numara (EU 40–44)',
   renk: 'renk (Siyah/Taba)',
   adet: 'adet (1 veya 2)'
 };
@@ -88,13 +92,10 @@ const faqMap = [
   { keys: ['fiyat','ucret','ücret','price'], reply: `1 adet ${PRICE1}. Ücretsiz ve şeffaf kargodur efendim. Kapıda ödemelidir. Hiçbir ek ücret yoktur.` },
   { keys: ['iki','çift','2 adet','paket','bundle'], reply: `2 adet ${PRICE2}. Ücretsiz ve şeffaf kargodur efendim. Kapıda ödemelidir. Hiçbir ek ücret yoktur.` },
   { keys: ['teslim','kargo','ne zaman','kaç günde','zaman','süre'], reply: 'Teşekkür ederiz efendim. Ortalama 2 ila 5 iş günü içinde size ulaşacaktır.' },
-  // KARGO FİRMASI — tek, pozitif cevap
-  { keys: ['hangi kargo','kargo firması','ptt var mı','ptt varmı','yurtiçi var mı','yurtiçi varmı','ptt','yurtiçi','hangi kargoyla','kargo hangisi'],
-    reply: 'Siparişleriniz Yurtiçi Kargo veya PTT Kargo ile gönderilecektir.' },
   { keys: ['görmeden','şeffaf','nasıl teslim','koli'], reply: 'Ücretsiz ve şeffaf kargodur. Kapıda ödemelidir. Ürününüzü görerek teslim alacaksınız. Görmeden ödeme yapmazsınız efendim.' },
   { keys: ['site','website','link','adres','nereden alırım'], reply: `Siparişinizi buradan oluşturabilirsiniz efendim: ${SITE}. Kargoya verilmeden önce çağrı merkezimiz sizi arayacaktır.` },
   { keys: ['indirim','pazarlık','düşer mi'], reply: 'İndirimli sabit barkotlu fiyatlarımızdır efendim.' },
-  { keys: ['kalıp','standart kalıp','dar mı','dar kalıp mı'], reply: 'Ayakkabılar standart kalıptır.' },
+  { keys: ['kalıp','standart kalıp','dar mı'], reply: 'Standart kalıptır efendim.' },
   { keys: ['numara','beden','ölçü'], reply: '40–44 numara aralığında mevcuttur efendim.' },
   {
     keys: [
@@ -107,6 +108,7 @@ const faqMap = [
   { keys: ['iptal'], reply: 'İptal edilmiştir. Teşekkür eder, iyi günler dileriz efendim.' },
   { keys: ['aynı ürün mü','farklı mı','aynı mı'], reply: 'Birebir aynı üründür. Ücretsiz ve şeffaf kargodur. Kapıda ödemelidir. Ürününüzü görerek teslim alacaksınız.' },
   { keys: ['kart','kredi kartı','taksit'], reply: 'Tabi efendim. Kapıda kart ile ödeme yapabilirsiniz. Tek çekimdir; ardından bankanızdan taksitlendirebilirsiniz.' },
+  { keys: ['malzeme','deri','taban'], reply: 'Deridir. Kauçuk termo ortopedik tabandır efendim. %100 yerli üretimdir. Kaliteli ürünlerdir.' },
   { keys: ['iade','geri','değişim','retur','return'], reply: 'Sadece Değişim mevcuttur efendim.' },
 ];
 
