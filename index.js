@@ -340,21 +340,21 @@ client.on('message', async (msg) => {
     const chatId = msg.from;
     const text = (msg.body || '').trim();
     const lower = text.toLowerCase();
-    // "hakiki deri" gibi ifadeleri engelle
-// 1) Yardımcı (opsiyonel)
+    // "hakiki deri" gibi ifadeleri engelle (çıktıdan tamamen sil)
 const BANNED = [/hakiki\s*deri/gi, /%100\s*deri/gi];
-function sanitizeText(s){ let out=String(s||''); for (const r of BANNED) out=out.replace(r,'Deridir'); return out; }
+function sanitizeText(text) {
+  let out = String(text || '');
+  for (const r of BANNED) out = out.replace(r, '').trim();
+  return out;
+}
 
-// 2) SESSION HEMEN OLUŞSUN (fotoğraf vb. bloklar sess.data kullanıyor)
-const sess = bootstrap(chatId);
-
-// 3) Deri sorusuna hızlı yanıt (TEK satır, sonra çık)
+// Deri sorusuna net yanıt
 if (/\b(deri|malzeme)\b/i.test(lower)) {
-  await msg.reply('Deridir. Kauçuk termo ortopedik tabandır efendim. %100 yerli üretimdir. Kaliteli ürünlerdir.');
+  await client.sendMessage(chatId, 'Deridir. Kauçuk termo ortopedik tabandır efendim. %100 yerli üretimdir. Kaliteli ürünlerdir.');
   return;
 }
 
-// 4) “fotoğraf/resim/görsel” istenirse İKİSİNİ de gönder, sonra eksikleri iste
+// (Güncellenmiş kısım) Fotoğraf isteği tespiti eklendi
 if (/\b(foto(ğraf)?|resim|görsel)\b/i.test(lower)) {
   if (IMG_SIYAH) await client.sendMessage(chatId, IMG_SIYAH);
   if (IMG_TABA) await client.sendMessage(chatId, IMG_TABA);
