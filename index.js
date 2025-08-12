@@ -140,7 +140,7 @@ function scheduleIdleReminder(chatId) {
   const t = setTimeout(async () => {
     try {
       const sess = sessions.get(chatId);
-      if (!sess || sess.muted || sess.stopReminders) return;
+      if (!sess || sess.muted || sess.stopReminders || sess.order) return;
       const msgText = buildReminderTextTR(Array.isArray(sess.missingFields)
         ? sess.missingFields
         : ['ad_soyad','adres','ilce','il','beden','renk','adet']);
@@ -237,6 +237,10 @@ async function askAI(chatId, userText) {
     .replace(/\[FIELDS:[^\]]+\]/gi, '')
     .replace(/^[ \t]*\n+/gm, '')
     .trim();
+
+  if (sess.order) {
+  reply = reply.replace(/.*siparişi tamamlayalım mı\?.*/gi, '').trim();
+}
 
   // model boş dökerse eksikleri iste
   if (!reply) {
@@ -342,6 +346,7 @@ client.on('message', async (msg) => {
     for (const f of faqMap) {
       if (f.keys.some(k => lower.includes(k))) {
         await msg.reply(f.reply);
+        if (!sess.order) {
         await msg.reply('Siparişinizi tamamlayalım mı? Lütfen ad soyad, adres (ilçe/il), numara (40–44), renk (Siyah/Taba) ve adet (1 veya 2) bilgisini yazınız.');
         if (!sessions.get(chatId).stopReminders) scheduleIdleReminder(chatId);
         return;
