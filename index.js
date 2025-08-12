@@ -22,7 +22,7 @@ function saveCustomer(phone, payload){ const db=dbRead(); db[phone] = { ...(db[p
 
 // --- Global ---
 let lastQr = null;
-const sessions = new Map();   // chatId -> { muted, history, stopReminders, missingFields, sentTaba, sentSiyah, data, order }
+const sessions = new Map();   // chatId -> { muted, history, stopReminders, missingFields, sentTaba, sentSiyah, data, order, _lastAsk, _rate }
 const idleTimers = new Map(); // chatId -> timeoutId (1 dk hatırlatma)
 const PORT = process.env.PORT || 3000;
 
@@ -45,8 +45,8 @@ const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
 
 // --- Ürün görselleri (isteğe bağlı yollar) ---
 let IMG_TABA = null, IMG_SIYAH = null;
-try { IMG_TABA  = MessageMedia.fromFilePath(process.env.IMG_TABA_PATH  || './media/taba.jpg'); } catch (e) { console.warn('IMG_TABA yüklenemedi'); }
-try { IMG_SIYAH = MessageMedia.fromFilePath(process.env.IMG_SIYAH_PATH || './media/siyah.jpg'); } catch (e) { console.warn('IMG_SIYAH yüklenemedi'); }
+try { IMG_TABA  = MessageMedia.fromFilePath(process.env.IMG_TABA_PATH  || './media/taba.jpg'); } catch (e) { console.warn('IMG_TABA yüklenemedi:', e.message); }
+try { IMG_SIYAH = MessageMedia.fromFilePath(process.env.IMG_SIYAH_PATH || './media/siyah.jpg'); } catch (e) { console.warn('IMG_SIYAH yüklenemedi:', e.message); }
 
 // --- Yardımcılar (TR) ---
 function pickPhoneTR(text) {
@@ -140,7 +140,7 @@ function scheduleIdleReminder(chatId) {
   const t = setTimeout(async () => {
     try {
       const sess = sessions.get(chatId);
-      if (!sess || sess.muted || sess.stopReminders || sess.order) return; // sipariş varsa dürtme
+      if (!sess || sess.muted || sess.stopReminders || sess.order) return;
       const msgText = buildReminderTextTR(Array.isArray(sess.missingFields)
         ? sess.missingFields
         : ['ad_soyad','adres','ilce','il','beden','renk','adet']);
@@ -177,7 +177,6 @@ TEKNİK FORMAT:
   (Bilmediğin alanı boş bırak; örn. adet= )
 `.trim();
 
-    // Numara → önceki hafızayı yükle
     const phoneWp = chatId.split('@')[0];
     const prev = getCustomer('+'+phoneWp);
 
@@ -189,67 +188,81 @@ TEKNİK FORMAT:
       sentTaba: false,
       sentSiyah: false,
       data: prev.data || { ad_soyad:'', adres:'', ilce:'', il:'', beden:'', renk:'', adet:'' },
-      order: prev.order || null
+      order: prev.order || null,
+      _lastAsk: null,
+      _rate: {}
     });
   }
   return sessions.get(chatId);
 }
 
-// --- AI çağrısı ---
-async function askAI(chatId, userText) {
-  const sess = bootstrap(chatId);
+// --- AI: Alan çıkarımı (zorunlu JSON) ---
+async function aiExtractFields(userText, history = []) {
+  const sys = `
+Sen bir alan-çıkarıcısın. SADECE geçerli tek satır JSON döndür.
+ŞEMA:
+{
+  "ad_soyad": string | "",
+  "adres": string | "",
+  "ilce": string | "",
+  "il": string | "",
+  "beden": "40"|"41"|"42"|"43"|"44"|"",
+  "renk": "Siyah"|"Taba"|"",
+  "adet": "1"|"2"|"",
+  "intent": "siparis"|"soru"|"iptal"|"tesekkur"|"diger"
+}
+KURALLAR:
+- Renk eşleşmeleri: siyah/black -> "Siyah"; taba/kahverengi -> "Taba".
+- "iki", "2" -> "2"; "bir", "1" -> "1".
+- Ad soyad tek kelimeyse boş bırak.
+- 40–44 dışı beden görürsen boş bırak.
+- Sadece JSON yaz, açıklama YOK.
+`.trim();
 
-  if (sess.history.length > 24) {
-    sess.history = [sess.history[0], ...sess.history.slice(-12)];
+  const messages = [
+    { role: 'system', content: sys },
+    ...history.slice(-6),
+    { role: 'user', content: userText }
+  ];
+
+  let out = "{}";
+  try {
+    const r = await ai.chat.completions.create({
+      model: OPENAI_MODEL,
+      temperature: 0.1,
+      messages
+      // response_format JSON destekliyorsa ekleyebilirsin: response_format:{type:"json_object"}
+    });
+    out = r.choices?.[0]?.message?.content?.trim() || "{}";
+  } catch {}
+
+  let data;
+  try { data = JSON.parse(out); } catch { data = null; }
+
+  if (!data || typeof data !== 'object') {
+    messages.unshift({ role:'system', content:'Yalnızca GEÇERLİ JSON yaz. Başka hiçbir şey yazma.' });
+    const r2 = await ai.chat.completions.create({ model: OPENAI_MODEL, temperature: 0, messages });
+    const out2 = r2.choices?.[0]?.message?.content?.trim() || "{}";
+    try { data = JSON.parse(out2); } catch { data = {}; }
   }
 
-  const phoneWp = chatId.split('@')[0];
-  let meta = `WhatsApp Numarası: +${phoneWp}`;
+  const norm = (s)=> String(s||'').trim();
+  const bedenOk = /^(40|41|42|43|44)$/.test(norm(data?.beden||''));
+  const renkMap = { siyah: 'Siyah', black: 'Siyah', taba: 'Taba', kahverengi: 'Taba' };
+  const renkIn = norm(data?.renk||'').toLowerCase();
+  const renkOk = renkMap[renkIn] || (['Siyah','Taba'].includes(data?.renk)?data.renk:'' );
+  const adetOk = /^(1|2)$/.test(norm(data?.adet||'')) ? norm(data.adet) : '';
 
-  const phoneProvided = pickPhoneTR(userText);
-  if (phoneProvided) {
-    meta += ` | Müşteri yeni telefon verdi: ${phoneProvided} (özette bunu kullan)`;
-  }
-
-  sess.history.push({ role: 'user', content: `${userText}\n\n(${meta})` });
-
-  const res = await ai.chat.completions.create({
-    model: OPENAI_MODEL,
-    temperature: 0.3,
-    messages: sess.history
-  });
-
-  let reply = res.choices?.[0]?.message?.content || '';
-
-  // MISSING & FIELDS'i işle
-  const missing = extractMissing(reply);
-  if (missing && missing.length) sess.missingFields = missing;
-
-  const fields = extractFields(reply);
-  if (fields) {
-    sess.data = { ...sess.data, ...fields };
-    saveCustomer('+'+phoneWp, { data: sess.data, order: sess.order });
-  }
-
-  // kullanıcıya teknik satırları asla gösterme (global temizle)
-  reply = reply
-    .replace(/\[MISSING:[^\]]+\]/gi, '')
-    .replace(/\[FIELDS:[^\]]+\]/gi, '')
-    .replace(/^[ \t]*\n+/gm, '')
-    .trim();
-
-  // siparişten sonra “tamamlayalım mı” türü çağrıları sustur
-  if (sess.order) {
-    reply = reply.replace(/.*siparişi tamamlayalım mı\?.*/gi, '').trim();
-  }
-
-  // model boş dökerse eksikleri iste
-  if (!reply) {
-    reply = buildReminderTextTR(Array.isArray(sess.missingFields) ? sess.missingFields : []);
-  }
-
-  sess.history.push({ role: 'assistant', content: reply });
-  return reply;
+  return {
+    ad_soyad: norm(data?.ad_soyad||''),
+    adres: norm(data?.adres||''),
+    ilce: norm(data?.ilce||''),
+    il: norm(data?.il||''),
+    beden: bedenOk ? norm(data?.beden) : '',
+    renk: renkOk,
+    adet: adetOk,
+    intent: ['siparis','soru','iptal','tesekkur','diger'].includes(data?.intent) ? data.intent : 'diger'
+  };
 }
 
 // --- WhatsApp Eventleri ---
@@ -263,6 +276,16 @@ client.on('ready', () => {
   console.log('✅ WhatsApp bot hazır.');
 });
 
+function shouldSend(chatId, key, ms=20000){
+  const sess = sessions.get(chatId) || {};
+  const now = Date.now();
+  if (!sess._rate) sess._rate = {};
+  if (sess._rate[key] && (now - sess._rate[key] < ms)) return false;
+  sess._rate[key] = now;
+  sessions.set(chatId, sess);
+  return true;
+}
+
 client.on('message', async (msg) => {
   try {
     if (msg.fromMe) return;
@@ -272,16 +295,18 @@ client.on('message', async (msg) => {
 
     const sess = bootstrap(chatId);
 
-    // Yalnızca "EVET" onayı gelince dürtmeyi kalıcı kes + sipariş state
+    // Yalnızca "EVET" onayı → dur
     if (/^\s*evet\s*$/i.test(text)) {
       sess.stopReminders = true;
       clearTimeout(idleTimers.get(chatId));
       if (!sess.order) sess.order = { status: 'hazirlaniyor' };
       const phoneWp = chatId.split('@')[0];
       saveCustomer('+'+phoneWp, { data: sess.data, order: sess.order });
+      await msg.reply('Teşekkürler, siparişiniz hazırlanıyor. Kargoya verildiğinde bilgilendireceğiz.');
+      return;
     }
 
-    // Kontrol komutları (TR)
+    // Kontrol komutları
     if (lower === 'temsilci') {
       sess.muted = true;
       await msg.reply('Sizi temsilciye aktarıyoruz. Teşekkürler!');
@@ -302,66 +327,31 @@ client.on('message', async (msg) => {
     }
     if (sess.muted) return;
 
-    // --- Hızlı alan yakalama (AI öncesi) ---
-    {
-      const upd = {};
-
-      // beden: 40-44 (tek sayı, cümle içinde de)
-      const mSize = lower.match(/(^|\D)(4[0-4])(?!\d)/);
-      if (mSize) upd.beden = mSize[2];
-
-      // adet: 1 veya 2 (örn: "2", "2 adet")
-      const mQty = lower.match(/(^|\s)([12])(\s*adet)?(\s|$)/);
-      if (mQty) upd.adet = mQty[2];
-
-      // renk: siyah / taba / kahverengi
-      if (/\bsiyah\b|black/i.test(lower)) upd.renk = 'Siyah';
-      if (/\btaba\b|kahverengi\b/i.test(lower)) upd.renk = 'Taba';
-
-      // ad soyad (iki+ kelime, rakamsız) – sadece boşsa
-      if (!sess.data.ad_soyad && /^\s*[a-zçğıöşü]+(?:\s+[a-zçğıöşü]+)+\s*$/i.test(text) && !/\d/.test(text)) {
-        upd.ad_soyad = text.trim().replace(/\s+/g,' ');
+    // — Görsel talebi (AI'yi bypass et) — EN ÖNCE
+    if (/\b(foto|fotoğraf|fotograf|resim|görsel)\b/i.test(lower) || /renk(leri|) (al|gör|goster|göster)/i.test(lower)) {
+      const sent = [];
+      if (sess.data.renk === 'Siyah' && IMG_SIYAH) { await client.sendMessage(chatId, IMG_SIYAH); sent.push('siyah'); }
+      if (sess.data.renk === 'Taba'  && IMG_TABA)  { await client.sendMessage(chatId, IMG_TABA);  sent.push('taba'); }
+      if (!sent.length) {
+        if (IMG_SIYAH) await client.sendMessage(chatId, IMG_SIYAH);
+        if (IMG_TABA)  await client.sendMessage(chatId, IMG_TABA);
       }
-
-      if (Object.keys(upd).length) {
-        sess.data = { ...sess.data, ...upd };
-        const phoneWp = chatId.split('@')[0];
-        saveCustomer('+'+phoneWp, { data: sess.data, order: sess.order });
+      const need = ['beden','renk','adet','ad_soyad','adres','ilce','il'].filter(k => !sess.data[k]);
+      if (need.length && shouldSend(chatId,'ask_'+need[0])) {
+        const q =
+          need[0] === 'beden' ? 'Numaranız nedir? (40–44)' :
+          need[0] === 'renk'  ? 'Hangi renk? (Siyah/Taba)' :
+          need[0] === 'adet'  ? 'Kaç adet? (1 veya 2)' :
+          need[0] === 'ad_soyad' ? 'Ad soyadınızı yazar mısınız? (iki kelime)' :
+          need[0] === 'adres' ? 'Adres (mahalle/cadde + kapı/daire) nedir?' :
+          need[0] === 'ilce'  ? 'Hangi ilçe?' : 'Hangi il?';
+        await msg.reply(q);
       }
-
-      // Sadece beden geldiyse kısa cevapla ve akışı durdur
-      const onlySize = Object.keys(upd).length === 1 && 'beden' in upd;
-      if (onlySize) {
-        await msg.reply(`${upd.beden} not edildi. Renk (Siyah/Taba) ve adet (1 veya 2) yazın.`);
-        if (!sessions.get(chatId).stopReminders) scheduleIdleReminder(chatId);
-        return;
-      }
+      if (!sessions.get(chatId).stopReminders) scheduleIdleReminder(chatId);
+      return;
     }
 
-    // — Renk teyidi görseli (bir kez gönder)
-    if (/\btaba\b/i.test(lower) || /\bkahverengi\b/i.test(lower)) {
-      if (!sess.sentTaba && IMG_TABA) {
-        await client.sendMessage(chatId, IMG_TABA);
-        sess.sentTaba = true;
-      }
-    }
-    if (/\bsiyah\b/i.test(lower) || /\bblack\b/i.test(lower)) {
-      if (!sess.sentSiyah && IMG_SIYAH) {
-        await client.sendMessage(chatId, IMG_SIYAH);
-        sess.sentSiyah = true;
-      }
-    }
-
-    // Kimlik soruları
-    for (const m of identityMap) {
-      if (m.keys.some(k => lower.includes(k))) {
-        await msg.reply(m.reply);
-        if (!sessions.get(chatId).stopReminders) scheduleIdleReminder(chatId);
-        return;
-      }
-    }
-
-    // --- Kargo durumu / takip soruları (AI'yi bypass et) ---
+    // --- Kargo durumu / takip soruları (AI bypass) ---
     const isCargoAsk = /\bkargo(m|)\b|\btakip\b|\bnerde\b|\bnerede\b|\bne zaman gelir\b/i.test(lower);
     if (isCargoAsk) {
       if (!sess.order) {
@@ -379,19 +369,60 @@ client.on('message', async (msg) => {
       return;
     }
 
-    // SSS (önce)
+    // --- SSS (AI'siz hızlı yanıt) ---
     for (const f of faqMap) {
       if (f.keys.some(k => lower.includes(k))) {
         await msg.reply(f.reply);
-        if (!sess.order) {
+        if (!sess.order && shouldSend(chatId,'after_faq')) {
           await msg.reply('Siparişinizi tamamlayalım mı? Lütfen ad soyad, adres (ilçe/il), numara (40–44), renk (Siyah/Taba) ve adet (1 veya 2) bilgisini yazınız.');
           if (!sessions.get(chatId).stopReminders) scheduleIdleReminder(chatId);
         }
-        return; // << önemli: her durumda bu bloktan çık
+        return;
       }
     }
 
-    // AI'ye gönder
+    // --- AI ile alan çıkar (tek mesajdan çoklu değer) ---
+    {
+      const fields = await aiExtractFields(text, sess.history);
+      let changed = false;
+      for (const k of ['ad_soyad','adres','ilce','il','beden','renk','adet']) {
+        if (fields[k] && fields[k] !== sess.data[k]) { sess.data[k] = fields[k]; changed = true; }
+      }
+      if (changed) {
+        const phoneWp = chatId.split('@')[0];
+        saveCustomer('+'+phoneWp, { data: sess.data, order: sess.order });
+      }
+
+      // Eksik → sıradaki eksik alanı tek tek iste
+      const need = ['beden','renk','adet','ad_soyad','adres','ilce','il'].filter(k => !sess.data[k]);
+      if (need.length) {
+        if (shouldSend(chatId,'ask_'+need[0])) {
+          const q =
+            need[0] === 'beden' ? 'Numaranız nedir? (40–44)' :
+            need[0] === 'renk'  ? 'Hangi renk? (Siyah/Taba)' :
+            need[0] === 'adet'  ? 'Kaç adet? (1 veya 2)' :
+            need[0] === 'ad_soyad' ? 'Ad soyadınızı yazar mısınız? (iki kelime)' :
+            need[0] === 'adres' ? 'Adres (mahalle/cadde + kapı/daire) nedir?' :
+            need[0] === 'ilce'  ? 'Hangi ilçe?' : 'Hangi il?';
+          await msg.reply(q);
+        }
+        if (!sessions.get(chatId).stopReminders) scheduleIdleReminder(chatId);
+        return;
+      }
+
+      // Hiç eksik yoksa → ÖZET ve onay
+      if (!need.length) {
+        const { ad_soyad, adres, ilce, il, beden, renk, adet } = sess.data;
+        const total = (adet === '2') ? PRICE2 : PRICE1;
+        await msg.reply(
+          `Özet:\n- Ad Soyad: ${ad_soyad}\n- Adres: ${adres} (${ilce}/${il})\n- Beden: ${beden}\n- Renk: ${renk}\n- Adet: ${adet}\nToplam: ${total}\nTeslimat: 2–5 iş günü (kargo ücretsiz ve şeffaf).\nOnay için “EVET”, düzeltme için “DÜZELT” yazınız.`
+        );
+        sess.stopReminders = true;
+        return;
+      }
+    }
+
+    // --- (Gerekirse) serbest AI cevabı ---
     const reply = await askAI(chatId, text);
     if (reply) {
       await msg.reply(reply);
