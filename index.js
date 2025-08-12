@@ -26,6 +26,16 @@ const sessions = new Map();   // chatId -> { muted, history, stopReminders, miss
 const idleTimers = new Map(); // chatId -> timeoutId (1 dk hatırlatma)
 const PORT = process.env.PORT || 3000;
 
+// --- De-dup guard (aynı mesaja tek cevap) ---
+const processedMsgIds = new Set();
+function alreadyProcessed(id) {
+  if (!id) return false;
+  if (processedMsgIds.has(id)) return true;
+  processedMsgIds.add(id);
+  setTimeout(() => processedMsgIds.delete(id), 5 * 60 * 1000); // 5 dk
+  return false;
+}
+
 // --- WhatsApp Client ---
 const client = new Client({
   authStrategy: new LocalAuth(),
@@ -160,7 +170,7 @@ function scheduleIdleReminder(chatId) {
   const t = setTimeout(async () => {
     try {
       const sess = sessions.get(chatId);
-      if (!sess || sess.muted || sess.stopReminders || sess.order) return; // sipariş varsa dürtme
+      if (!sess || sess.muted || sess.stopReminders || sess.order) return;
       const msgText = buildReminderTextTR(Array.isArray(sess.missingFields)
         ? sess.missingFields
         : ['ad_soyad','adres','ilce','il','beden','renk','adet']);
@@ -201,13 +211,10 @@ KURALLAR:
 TEKNİK FORMAT:
 - Her cevabın SONUNDA sadece sistem için şu satırı ekle:
   [MISSING: ad_soyad,adres,ilce,il,beden,renk,adet]
-  (Eksik olmayanları yazma; hiç eksik yoksa [MISSING: none]. Bu satırı müşteriye açıklama.)
 - Ayrıca ikinci bir satır daha ekle:
   [FIELDS: ad_soyad=<...>; adres=<...>; ilce=<...>; il=<...>; beden=<...>; renk=<...>; adet=<...>]
-  (Bilmediğin alanı boş bırak; örn. adet= )
 `.trim();
 
-    // Numara → önceki hafızayı yükle
     const phoneWp = chatId.split('@')[0];
     const prev = getCustomer('+'+phoneWp);
 
@@ -225,7 +232,7 @@ TEKNİK FORMAT:
   return sessions.get(chatId);
 }
 
-// --- AI çağrısı ---
+// --- AI çağrısı (asla çökmez; fallback var) ---
 async function askAI(chatId, userText, metaHints='') {
   const sess = bootstrap(chatId);
 
@@ -238,21 +245,24 @@ async function askAI(chatId, userText, metaHints='') {
   if (metaHints) meta += ` | Ön-çıkarımlar: ${metaHints}`;
 
   const phoneProvided = pickPhoneTR(userText);
-  if (phoneProvided) {
-    meta += ` | Müşteri yeni telefon verdi: ${phoneProvided} (özette bunu kullan)`;
-  }
+  if (phoneProvided) meta += ` | Müşteri yeni telefon verdi: ${phoneProvided} (özette bunu kullan)`;
 
   sess.history.push({ role: 'user', content: `${userText}\n\n(${meta})` });
 
-  const res = await ai.chat.completions.create({
-    model: OPENAI_MODEL,
-    temperature: 0.3,
-    messages: sess.history
-  });
+  let reply = '';
+  try {
+    const res = await ai.chat.completions.create({
+      model: OPENAI_MODEL,
+      temperature: 0.3,
+      messages: sess.history
+    });
+    reply = res.choices?.[0]?.message?.content || '';
+  } catch (e) {
+    console.error('OpenAI hata:', e?.status || e?.code || e?.message);
+    // Fallback: eksikleri iste – kullanıcıya hata göstermeden
+    reply = buildReminderTextTR(Array.isArray(sess.missingFields) ? sess.missingFields : []);
+  }
 
-  let reply = res.choices?.[0]?.message?.content || '';
-
-  // MISSING & FIELDS'i işle
   const missing = extractMissing(reply);
   if (missing && missing.length) sess.missingFields = missing;
 
@@ -262,21 +272,14 @@ async function askAI(chatId, userText, metaHints='') {
     saveCustomer('+'+phoneWp, { data: sess.data, order: sess.order });
   }
 
-  // teknik satırları gizle
   reply = reply
     .replace(/\[MISSING:[^\]]+\]/gi, '')
     .replace(/\[FIELDS:[^\]]+\]/gi, '')
     .replace(/^[ \t]*\n+/gm, '')
     .trim();
 
-  // siparişten sonra “tamamlayalım mı” sustur
-  if (sess.order) {
-    reply = reply.replace(/.*siparişi tamamlayalım mı\?.*/gi, '').trim();
-  }
-
-  if (!reply) {
-    reply = buildReminderTextTR(Array.isArray(sess.missingFields) ? sess.missingFields : []);
-  }
+  if (sess.order) reply = reply.replace(/.*siparişi tamamlayalım mı\?.*/gi, '').trim();
+  if (!reply) reply = buildReminderTextTR(Array.isArray(sess.missingFields) ? sess.missingFields : []);
 
   sess.history.push({ role: 'assistant', content: reply });
   return reply;
@@ -300,15 +303,24 @@ client.on('ready', () => {
 });
 
 client.on('message', async (msg) => {
+  // DEDUPE: aynı mesajı ikinci kez işlemeyi kes
+  const msgId = msg.id?._serialized || `${msg.from}-${msg.timestamp}-${(msg.body||'').length}`;
+  if (alreadyProcessed(msgId)) return;
+
   try {
     if (msg.fromMe) return;
+    // sistem/protokol mesajlarını yoksay
+    if (!msg.body) return;
     const chatId = msg.from;
     const text = (msg.body || '').trim();
     const lower = text.toLowerCase();
 
+    // WhatsApp'ın "Süreli mesajlar etkinleştirildi" vb. protokol metinlerini yoksay
+    if (/süreli mesajlar etkinleştirildi/i.test(lower)) return;
+
     const sess = bootstrap(chatId);
 
-    // Yalnızca "EVET" onayı gelince dürtmeyi kalıcı kes + sipariş state
+    // "EVET" onayı
     if (/^\s*evet\s*$/i.test(text)) {
       sess.stopReminders = true;
       clearTimeout(idleTimers.get(chatId));
@@ -317,7 +329,7 @@ client.on('message', async (msg) => {
       saveCustomer('+'+phoneWp, { data: sess.data, order: sess.order });
     }
 
-    // Kontrol komutları (TR)
+    // Kontrol komutları
     if (lower === 'temsilci') {
       sess.muted = true;
       await msg.reply('Sizi temsilciye aktarıyoruz. Teşekkürler!');
@@ -361,7 +373,7 @@ client.on('message', async (msg) => {
       }
     }
 
-    // --- Kargo durumu / takip soruları (AI'yi bypass et) ---
+    // --- Kargo / takip soruları ---
     const isCargoAsk = /\bkargo(m|)\b|\btakip\b|\bnerde\b|\bnerede\b|\bne zaman gelir\b/i.test(lower);
     if (isCargoAsk) {
       if (!sess.order) {
@@ -416,13 +428,11 @@ client.on('message', async (msg) => {
 
     // === ÖZET/GUARD KONTROLLERİ ===
     if (looksLikeSummary(reply)) {
-      // Beden yoksa özet gönderme
       if (!sess.data.beden) {
         await msg.reply('Numara belirtilmemiş. Lütfen **EU 40–44** aralığında numarayı yazınız (örn: 44).');
         if (!sessions.get(chatId).stopReminders) scheduleIdleReminder(chatId);
         return;
       }
-      // 2 adet ise iki beden/renk zorunlu
       if (sess.data.adet === '2') {
         const hasTwoSizes = (sess.data.beden||'').includes(',');
         const hasTwoColors = (sess.data.renk||'').includes(',');
@@ -445,8 +455,11 @@ client.on('message', async (msg) => {
     }
 
   } catch (err) {
-    console.error('❌ Hata:', err);
-    try { await msg.reply('Üzgünüz, geçici bir hata oluştu. Lütfen tekrar deneyin.'); } catch {}
+    console.error('❌ Handler hata:', err?.message || err);
+    // Kullanıcıya asla hata metni göstermeden güvenli fallback
+    try {
+      await msg.reply('Siparişi tamamlayalım mı? Lütfen ad soyad, adres (ilçe/il), numara (40–44), renk (Siyah/Taba) ve adet (1 veya 2) bilgisini yazınız.');
+    } catch {}
   }
 });
 
