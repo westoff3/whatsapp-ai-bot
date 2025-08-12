@@ -11,10 +11,18 @@ import 'dotenv/config';
 import OpenAI from 'openai';
 import express from 'express';
 import QRCode from 'qrcode';
+import fs from 'fs';
+
+// --- Mini-DB (JSON dosya) ---
+const DB_PATH = './db.json';
+function dbRead(){ try{ return JSON.parse(fs.readFileSync(DB_PATH,'utf8')); } catch{ return {}; } }
+function dbWrite(x){ fs.writeFileSync(DB_PATH, JSON.stringify(x, null, 2)); }
+function getCustomer(phone){ const db=dbRead(); return db[phone] || { data:{}, order:null, updatedAt:0 }; }
+function saveCustomer(phone, payload){ const db=dbRead(); db[phone] = { ...(db[phone]||{}), ...payload, updatedAt:Date.now() }; dbWrite(db); }
 
 // --- Global ---
 let lastQr = null;
-const sessions = new Map();   // chatId -> { muted, history, stopReminders, missingFields, sentTaba, sentSiyah }
+const sessions = new Map();   // chatId -> { muted, history, stopReminders, missingFields, sentTaba, sentSiyah, data, order }
 const idleTimers = new Map(); // chatId -> timeoutId (1 dk hatırlatma)
 const PORT = process.env.PORT || 3000;
 
@@ -37,12 +45,8 @@ const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
 
 // --- Ürün görselleri (isteğe bağlı yollar) ---
 let IMG_TABA = null, IMG_SIYAH = null;
-try {
-  IMG_TABA  = MessageMedia.fromFilePath(process.env.IMG_TABA_PATH  || './media/taba.jpg');
-} catch {}
-try {
-  IMG_SIYAH = MessageMedia.fromFilePath(process.env.IMG_SIYAH_PATH || './media/siyah.jpg');
-} catch {}
+try { IMG_TABA  = MessageMedia.fromFilePath(process.env.IMG_TABA_PATH  || './media/taba.jpg'); } catch {}
+try { IMG_SIYAH = MessageMedia.fromFilePath(process.env.IMG_SIYAH_PATH || './media/siyah.jpg'); } catch {}
 
 // --- Yardımcılar (TR) ---
 function pickPhoneTR(text) {
@@ -52,12 +56,21 @@ function pickPhoneTR(text) {
   let core = digits.replace(/^0090/, '').replace(/^90/, '').replace(/^0/, '');
   return '+90' + core;
 }
-
-// AI’dan gelen metindeki [MISSING: ...] etiketini oku
 function extractMissing(reply) {
   const m = reply.match(/\[MISSING:([^\]]+)\]\s*$/i);
   if (!m) return null;
   return m[1].split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+}
+function extractFields(reply){
+  const m = reply.match(/\[FIELDS:\s*([^\]]*)\]/i);
+  if (!m) return null;
+  const out = {};
+  m[1].split(';').forEach(pair=>{
+    const [k,v] = pair.split('=');
+    if (!k) return;
+    out[k.trim().toLowerCase()] = (v||'').trim();
+  });
+  return out;
 }
 
 // Hatırlatma metni üret (yalnız eksikleri iste)
@@ -156,7 +169,14 @@ TEKNİK FORMAT:
 - Her cevabın SONUNDA sadece sistem için şu satırı ekle:
   [MISSING: ad_soyad,adres,ilce,il,beden,renk,adet]
   (Eksik olmayanları yazma; hiç eksik yoksa [MISSING: none]. Bu satırı müşteriye açıklama.)
+- Ayrıca ikinci bir satır daha ekle:
+  [FIELDS: ad_soyad=<...>; adres=<...>; ilce=<...>; il=<...>; beden=<...>; renk=<...>; adet=<...>]
+  (Bilmediğin alanı boş bırak; örn. adet= )
 `.trim();
+
+    // Numara → önceki hafızayı yükle
+    const phoneWp = chatId.split('@')[0];
+    const prev = getCustomer('+'+phoneWp);
 
     sessions.set(chatId, {
       muted: false,
@@ -164,7 +184,9 @@ TEKNİK FORMAT:
       stopReminders: false,
       missingFields: ['ad_soyad','adres','ilce','il','beden','renk','adet'],
       sentTaba: false,
-      sentSiyah: false
+      sentSiyah: false,
+      data: prev.data || { ad_soyad:'', adres:'', ilce:'', il:'', beden:'', renk:'', adet:'' },
+      order: prev.order || null
     });
   }
   return sessions.get(chatId);
@@ -195,10 +217,23 @@ async function askAI(chatId, userText) {
   });
 
   let reply = res.choices?.[0]?.message?.content || '';
+
+  // MISSING & FIELDS'i işle
   const missing = extractMissing(reply);
   if (missing && missing.length) sess.missingFields = missing;
 
-  reply = reply.replace(/\s*\[MISSING:[^\]]+\]\s*$/i, '').trim();
+  const fields = extractFields(reply);
+  if (fields) {
+    sess.data = { ...sess.data, ...fields };
+    saveCustomer('+'+phoneWp, { data: sess.data, order: sess.order });
+  }
+
+  // son kullanıcıya teknik satırları gösterme
+  reply = reply
+    .replace(/\s*\[MISSING:[^\]]+\]\s*$/i, '')
+    .replace(/\s*\[FIELDS:[^\]]+\]\s*$/i, '')
+    .trim();
+
   sess.history.push({ role: 'assistant', content: reply });
   return reply;
 }
@@ -223,10 +258,13 @@ client.on('message', async (msg) => {
 
     const sess = bootstrap(chatId);
 
-    // Yalnızca "EVET" onayı gelince dürtmeyi kalıcı kes
+    // Yalnızca "EVET" onayı gelince dürtmeyi kalıcı kes + sipariş state
     if (/^\s*evet\s*$/i.test(text)) {
       sess.stopReminders = true;
       clearTimeout(idleTimers.get(chatId));
+      if (!sess.order) sess.order = { status: 'hazirlaniyor' };
+      const phoneWp = chatId.split('@')[0];
+      saveCustomer('+'+phoneWp, { data: sess.data, order: sess.order });
     }
 
     // Kontrol komutları (TR)
@@ -271,6 +309,24 @@ client.on('message', async (msg) => {
         if (!sessions.get(chatId).stopReminders) scheduleIdleReminder(chatId);
         return;
       }
+    }
+
+    // --- Kargo durumu / takip soruları (AI'yi bypass et) ---
+    const isCargoAsk = /\bkargo(m|)\b|\btakip\b|\bnerde\b|\bnerede\b|\bne zaman gelir\b/i.test(lower);
+    if (isCargoAsk) {
+      if (!sess.order) {
+        await msg.reply('Sistemde tamamlanmış bir siparişiniz görünmüyor. Onayladıysanız “EVET” yazmış olmanız gerekir.');
+      } else if (sess.order.status === 'hazirlaniyor') {
+        await msg.reply('Siparişiniz hazırlanıyor, kargoya verildiğinde buradan bilgilendirileceksiniz.');
+      } else if (sess.order.status === 'kargoda') {
+        await msg.reply('Siparişiniz kargoya verildi, tahmini teslim 2–5 iş günü içinde. Detaylar en kısa sürede paylaşılacaktır.');
+      } else if (sess.order.status === 'teslim') {
+        await msg.reply('Siparişiniz teslim edilmiş görünüyor. Bir sorun varsa yazın, yardımcı olalım.');
+      } else if (sess.order.status === 'iptal') {
+        await msg.reply('Son siparişiniz iptal edilmiş görünüyor. Yeniden oluşturmak isterseniz yazın.');
+      }
+      if (!sessions.get(chatId).stopReminders) scheduleIdleReminder(chatId);
+      return;
     }
 
     // SSS (önce)
