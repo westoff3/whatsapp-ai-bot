@@ -2,9 +2,10 @@
 // Çalışma Ortamı: Railway / Node 18+
 // ENV: OPENAI_API_KEY
 // Opsiyonel ENV: STORE_NAME, OPENAI_MODEL (varsayılan gpt-4o-mini)
+// Opsiyonel ENV: IMG_TABA_PATH, IMG_SIYAH_PATH  (örn: ./media/taba.jpg)
 
 import pkg from 'whatsapp-web.js';
-const { Client, LocalAuth } = pkg;
+const { Client, LocalAuth, MessageMedia } = pkg;
 import qrcode from 'qrcode-terminal';
 import 'dotenv/config';
 import OpenAI from 'openai';
@@ -13,7 +14,7 @@ import QRCode from 'qrcode';
 
 // --- Global ---
 let lastQr = null;
-const sessions = new Map();   // chatId -> { muted, history, stopReminders, missingFields }
+const sessions = new Map();   // chatId -> { muted, history, stopReminders, missingFields, sentTaba, sentSiyah }
 const idleTimers = new Map(); // chatId -> timeoutId (1 dk hatırlatma)
 const PORT = process.env.PORT || 3000;
 
@@ -34,10 +35,18 @@ const client = new Client({
 const ai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
 
+// --- Ürün görselleri (isteğe bağlı yollar) ---
+let IMG_TABA = null, IMG_SIYAH = null;
+try {
+  IMG_TABA  = MessageMedia.fromFilePath(process.env.IMG_TABA_PATH  || './media/taba.jpg');
+} catch {}
+try {
+  IMG_SIYAH = MessageMedia.fromFilePath(process.env.IMG_SIYAH_PATH || './media/siyah.jpg');
+} catch {}
+
 // --- Yardımcılar (TR) ---
 function pickPhoneTR(text) {
   const digits = (text || '').replace(/\D+/g, '');
-  // 05XXXXXXXXX | 5XXXXXXXXX | +905XXXXXXXXX | 00905XXXXXXXXX
   const ok = /^(?:0090|90)?5\d{9}$|^0?5\d{9}$/.test(digits);
   if (!ok) return null;
   let core = digits.replace(/^0090/, '').replace(/^90/, '').replace(/^0/, '');
@@ -48,8 +57,7 @@ function pickPhoneTR(text) {
 function extractMissing(reply) {
   const m = reply.match(/\[MISSING:([^\]]+)\]\s*$/i);
   if (!m) return null;
-  const keys = m[1].split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
-  return keys;
+  return m[1].split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
 }
 
 // Hatırlatma metni üret (yalnız eksikleri iste)
@@ -89,16 +97,22 @@ const faqMap = [
   { keys: ['indirim','pazarlık','düşer mi'], reply: 'İndirimli sabit barkotlu fiyatlarımızdır efendim.' },
   { keys: ['kalıp','standart kalıp','dar mı'], reply: 'Standart kalıptır efendim.' },
   { keys: ['numara','beden','ölçü'], reply: '40–44 numara aralığında mevcuttur efendim.' },
-  { keys: ['nereden','hangi şehir'], reply: 'Konya’dan 81 ile göndermekteyiz efendim.' },
+  {
+    keys: [
+      'nereden','nerden','hangi şehir','neresi','neredensiniz',
+      'nereden gönder','nerden gönder','nereden gelecek','nerden gelecek',
+      'nereden kargo','nereden çıkış','yerin nere','yeriniz neresi'
+    ],
+    reply: 'Konya’dan 81 ile göndermekteyiz efendim.'
+  },
   { keys: ['iptal'], reply: 'İptal edilmiştir. Teşekkür eder, iyi günler dileriz efendim.' },
   { keys: ['aynı ürün mü','farklı mı','aynı mı'], reply: 'Birebir aynı üründür. Ücretsiz ve şeffaf kargodur. Kapıda ödemelidir. Ürününüzü görerek teslim alacaksınız.' },
   { keys: ['kart','kredi kartı','taksit'], reply: 'Tabi efendim. Kapıda kart ile ödeme yapabilirsiniz. Tek çekimdir; ardından bankanızdan taksitlendirebilirsiniz.' },
   { keys: ['malzeme','deri','taban'], reply: 'Deridir. Kauçuk termo ortopedik tabandır efendim. %100 yerli üretimdir. Kaliteli ürünlerdir.' },
-  // İade/Değişim — talebin doğrultusunda
   { keys: ['iade','geri','değişim','retur','return'], reply: 'Sadece Değişim mevcuttur efendim.' },
 ];
 
-// --- Kimlik soruları (bot musun / insan mısın) kısa yanıtları ---
+// --- Kimlik soruları ---
 const identityMap = [
   { keys: ['bot musun','robot','yapay zek','ai misin','insan mısın'],
     reply: 'Mağaza asistanıyım. Hızlı yardımcı olurum, isterseniz temsilciye de aktarabilirim.' }
@@ -148,8 +162,9 @@ TEKNİK FORMAT:
       muted: false,
       history: [{ role: 'system', content: systemPromptTR }],
       stopReminders: false,
-      // başlangıçta her şey eksik varsay
-      missingFields: ['ad_soyad','adres','ilce','il','beden','renk','adet']
+      missingFields: ['ad_soyad','adres','ilce','il','beden','renk','adet'],
+      sentTaba: false,
+      sentSiyah: false
     });
   }
   return sessions.get(chatId);
@@ -163,11 +178,9 @@ async function askAI(chatId, userText) {
     sess.history = [sess.history[0], ...sess.history.slice(-12)];
   }
 
-  // WhatsApp numarası
   const phoneWp = chatId.split('@')[0];
   let meta = `WhatsApp Numarası: +${phoneWp}`;
 
-  // Kullanıcı metninden farklı bir telefon geldiyse meta'ya açıkça yaz
   const phoneProvided = pickPhoneTR(userText);
   if (phoneProvided) {
     meta += ` | Müşteri yeni telefon verdi: ${phoneProvided} (özette bunu kullan)`;
@@ -182,14 +195,10 @@ async function askAI(chatId, userText) {
   });
 
   let reply = res.choices?.[0]?.message?.content || '';
-  // 1) MISSING etiketini oku ve state'e yaz
   const missing = extractMissing(reply);
-  if (missing && missing.length) {
-    sess.missingFields = missing;
-  }
-  // 2) Bu meta satırını müşteriye gösterme
-  reply = reply.replace(/\s*\[MISSING:[^\]]+\]\s*$/i, '').trim();
+  if (missing && missing.length) sess.missingFields = missing;
 
+  reply = reply.replace(/\s*\[MISSING:[^\]]+\]\s*$/i, '').trim();
   sess.history.push({ role: 'assistant', content: reply });
   return reply;
 }
@@ -228,17 +237,32 @@ client.on('message', async (msg) => {
     }
     if (lower === 'bot' || lower === 'asistan') {
       sess.muted = false;
-      sess.stopReminders = false; // bot yeniden açıldı → dürtmeler tekrar aktif
+      sess.stopReminders = false;
       await msg.reply('Asistan yeniden aktif. Nasıl yardımcı olabilirim?');
       return;
     }
     if (lower.includes('yeni')) {
       sessions.delete(chatId);
-      bootstrap(chatId);
+      const s = bootstrap(chatId);
+      s.sentTaba = false; s.sentSiyah = false;
       await msg.reply('Yeni bir görüşme başlatıldı. Size nasıl yardımcı olalım?');
       return;
     }
     if (sess.muted) return;
+
+    // — Renk teyidi görseli (bir kez gönder)
+    if (/\btaba\b/i.test(lower) || /\bkahverengi\b/i.test(lower)) {
+      if (!sess.sentTaba && IMG_TABA) {
+        await client.sendMessage(chatId, IMG_TABA);
+        sess.sentTaba = true;
+      }
+    }
+    if (/\bsiyah\b/i.test(lower) || /\bblack\b/i.test(lower)) {
+      if (!sess.sentSiyah && IMG_SIYAH) {
+        await client.sendMessage(chatId, IMG_SIYAH);
+        sess.sentSiyah = true;
+      }
+    }
 
     // Kimlik soruları
     for (const m of identityMap) {
