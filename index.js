@@ -22,7 +22,7 @@ function saveCustomer(phone, payload){ const db=dbRead(); db[phone] = { ...(db[p
 
 // --- Global ---
 let lastQr = null;
-const sessions = new Map();   // chatId -> { muted, history, stopReminders, missingFields, sentTaba, sentSiyah, data, order, _lastAsk, _rate }
+const sessions = new Map();   // chatId -> { muted, history, stopReminders, missingFields, sentTaba, sentSiyah, data, order, lastFaqAt }
 const idleTimers = new Map(); // chatId -> timeoutId (1 dk hatırlatma)
 const PORT = process.env.PORT || 3000;
 
@@ -45,8 +45,8 @@ const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
 
 // --- Ürün görselleri (isteğe bağlı yollar) ---
 let IMG_TABA = null, IMG_SIYAH = null;
-try { IMG_TABA  = MessageMedia.fromFilePath(process.env.IMG_TABA_PATH  || './media/taba.jpg'); } catch (e) { console.warn('IMG_TABA yüklenemedi:', e.message); }
-try { IMG_SIYAH = MessageMedia.fromFilePath(process.env.IMG_SIYAH_PATH || './media/siyah.jpg'); } catch (e) { console.warn('IMG_SIYAH yüklenemedi:', e.message); }
+try { IMG_TABA  = MessageMedia.fromFilePath(process.env.IMG_TABA_PATH  || './media/taba.jpg'); } catch (e) { console.warn('IMG_TABA yüklenemedi'); }
+try { IMG_SIYAH = MessageMedia.fromFilePath(process.env.IMG_SIYAH_PATH || './media/siyah.jpg'); } catch (e) { console.warn('IMG_SIYAH yüklenemedi'); }
 
 // --- Yardımcılar (TR) ---
 function pickPhoneTR(text) {
@@ -103,29 +103,22 @@ const SITE = 'https://pellvero.com/products/klasik-erkek-ayakkabi-iki-renk-secen
 const PRICE1 = '999,90 TL';
 const PRICE2 = '1.499,90 TL';
 
-// --- Hızlı SSS (TR tetik / TR yanıt) ---
+// --- SSS (regex + debounce) ---
 const faqMap = [
-  { keys: ['fiyat','ucret','ücret','price'], reply: `1 adet ${PRICE1}. Ücretsiz ve şeffaf kargodur efendim. Kapıda ödemelidir. Hiçbir ek ücret yoktur.` },
-  { keys: ['iki','çift','2 adet','paket','bundle'], reply: `2 adet ${PRICE2}. Ücretsiz ve şeffaf kargodur efendim. Kapıda ödemelidir. Hiçbir ek ücret yoktur.` },
-  { keys: ['teslim','kargo','ne zaman','kaç günde','zaman','süre'], reply: 'Teşekkür ederiz efendim. Ortalama 2 ila 5 iş günü içinde size ulaşacaktır.' },
-  { keys: ['görmeden','şeffaf','nasıl teslim','koli'], reply: 'Ücretsiz ve şeffaf kargodur. Kapıda ödemelidir. Ürününüzü görerek teslim alacaksınız. Görmeden ödeme yapmazsınız efendim.' },
-  { keys: ['site','website','link','adres','nereden alırım'], reply: `Siparişinizi buradan oluşturabilirsiniz efendim: ${SITE}. Kargoya verilmeden önce çağrı merkezimiz sizi arayacaktır.` },
-  { keys: ['indirim','pazarlık','düşer mi'], reply: 'İndirimli sabit barkotlu fiyatlarımızdır efendim.' },
-  { keys: ['kalıp','standart kalıp','dar mı'], reply: 'Standart kalıptır efendim.' },
-  { keys: ['numara','beden','ölçü'], reply: '40–44 numara aralığında mevcuttur efendim.' },
-  {
-    keys: [
-      'nereden','nerden','hangi şehir','neresi','neredensiniz',
-      'nereden gönder','nerden gönder','nereden gelecek','nerden gelecek',
-      'nereden kargo','nereden çıkış','yerin nere','yeriniz neresi'
-    ],
-    reply: 'Konya’dan 81 ile göndermekteyiz efendim.'
-  },
-  { keys: ['iptal'], reply: 'İptal edilmiştir. Teşekkür eder, iyi günler dileriz efendim.' },
-  { keys: ['aynı ürün mü','farklı mı','aynı mı'], reply: 'Birebir aynı üründür. Ücretsiz ve şeffaf kargodur. Kapıda ödemelidir. Ürününüzü görerek teslim alacaksınız.' },
-  { keys: ['kart','kredi kartı','taksit'], reply: 'Tabi efendim. Kapıda kart ile ödeme yapabilirsiniz. Tek çekimdir; ardından bankanızdan taksitlendirebilirsiniz.' },
-  { keys: ['malzeme','deri','taban'], reply: 'Deridir. Kauçuk termo ortopedik tabandır efendim. %100 yerli üretimdir. Kaliteli ürünlerdir.' },
-  { keys: ['iade','geri','değişim','retur','return'], reply: 'Sadece Değişim mevcuttur efendim.' },
+  { regex: /\b(2\s*adet|çift)\b/i, reply: `2 adet ${PRICE2}. Ücretsiz ve şeffaf kargodur efendim. Kapıda ödemelidir. Hiçbir ek ücret yoktur.` },
+  { regex: /\b(fiyat|ücret|price)\b/i, reply: `1 adet ${PRICE1}. Ücretsiz ve şeffaf kargodur efendim. Kapıda ödemelidir. Hiçbir ek ücret yoktur.` },
+  { regex: /\b(teslim|kargo|kaç günde|ne zaman|süre)\b/i, reply: 'Teşekkür ederiz efendim. Ortalama 2 ila 5 iş günü içinde size ulaşacaktır.' },
+  { regex: /\b(görmeden|şeffaf|nasıl teslim|koli)\b/i, reply: 'Ücretsiz ve şeffaf kargodur. Kapıda ödemelidir. Ürününüzü görerek teslim alacaksınız. Görmeden ödeme yapmazsınız efendim.' },
+  { regex: /\b(site|website|link|adres|nereden alırım)\b/i, reply: `Siparişinizi buradan oluşturabilirsiniz efendim: ${SITE}. Kargoya verilmeden önce çağrı merkezimiz sizi arayacaktır.` },
+  { regex: /\b(indirim|pazarlık|düşer mi)\b/i, reply: 'İndirimli sabit barkotlu fiyatlarımızdır efendim.' },
+  { regex: /\b(kalıp|standart kalıp|dar m[ıi])\b/i, reply: 'Standart kalıptır efendim.' },
+  { regex: /\b(numara|beden|ölçü)\b/i, reply: '40–44 numara aralığında mevcuttur efendim.' },
+  { regex: /\b(nereden|nerden|hangi şehir|neresi|neredensiniz|nereden gönder|nereden gelecek|nereden kargo|nereden çıkış|yerin nere|yeriniz neresi)\b/i, reply: 'Konya’dan 81 ile göndermekteyiz efendim.' },
+  { regex: /\biptal\b/i, reply: 'İptal edilmiştir. Teşekkür eder, iyi günler dileriz efendim.' },
+  { regex: /\b(aynı ürün mü|farklı mı|aynı mı)\b/i, reply: 'Birebir aynı üründür. Ücretsiz ve şeffaf kargodur. Kapıda ödemelidir. Ürününüzü görerek teslim alacaksınız.' },
+  { regex: /\b(kart|kredi kart[ıi]|taksit)\b/i, reply: 'Tabi efendim. Kapıda kart ile ödeme yapabilirsiniz. Tek çekimdir; ardından bankanızdan taksitlendirebilirsiniz.' },
+  { regex: /\b(malzeme|deri|taban)\b/i, reply: 'Kauçuk termo ortopedik tabandır efendim. %100 yerli üretimdir. Kaliteli ürünlerdir.' },
+  { regex: /\b(iade|geri|değişim|retur|return)\b/i, reply: 'Sadece Değişim mevcuttur efendim.' },
 ];
 
 // --- Kimlik soruları ---
@@ -134,16 +127,84 @@ const identityMap = [
     reply: 'Mağaza asistanıyım. Hızlı yardımcı olurum, isterseniz temsilciye de aktarabilirim.' }
 ];
 
+// --- İl listesi (kısa örnek, ihtiyacına göre genişlet) ---
+const ILER = [
+  'adana','adiyaman','afyonkarahisar','ağrı','amasya','ankara','antalya','artvin','aydın','balıkesir','bilecik','bingöl','bitlis','bolu','burdur','bursa','çanakkale','çankırı','çorum','denizli','diyarbakır','edirne','elazığ','erzincan','erzurum','eskişehir','gaziantep','giresun','gümüşhane','hakkari','hatay','ısparta','mersin','istanbul','izmir','kars','kastamonu','kayseri','kırklareli','kırşehir','kocaeli','konya','kütahya','malatya','manisa','kahramanmaraş','mardin','muğla','muş','nevşehir','niğde','ordu','rize','sakarya','samsun','siirt','sinop','sivas','tekirdağ','tokat','trabzon','tunceli','şanlıurfa','uşak','van','yozgat','zonguldak','aksaray','bayburt','karaman','kırıkkale','batman','şırnak','bartın','ardahan','ığdır','yalova','karabük','kilis','osmaniye','düzce'
+];
+
+// --- Parserlar ---
+function parseOrderText(t){
+  const lower=t.toLowerCase();
+  const sizes = [...lower.matchAll(/\b4[0-4]\b/g)].map(m=>m[0]);
+  const want2 = /\b(2\s*adet|iki|çift)\b/.test(lower) || Number((lower.match(/\b[12]\b/)||[])[0])===2;
+  const colors = { siyah: /\bsiyah\b/.test(lower), taba: /\b(taba|kahverengi)\b/.test(lower) };
+
+  const items=[];
+  if (want2) {
+    const s = sizes[0]||sizes[1]||null;
+    if (s && colors.siyah && colors.taba) items.push({beden:s,renk:'Siyah'},{beden:s,renk:'Taba'});
+    else if (sizes.length>=2 && colors.siyah) items.push({beden:sizes[0],renk:'Siyah'},{beden:sizes[1],renk: colors.taba?'Taba':'Siyah'});
+    else if (sizes.length>=2 && colors.taba) items.push({beden:sizes[0],renk:'Taba'},{beden:sizes[1],renk:'Taba'});
+    else if (sizes.length>=2) items.push({beden:sizes[0],renk:''},{beden:sizes[1],renk:''});
+    else if (s) items.push({beden:s,renk:''},{beden:s,renk:''});
+  } else {
+    const s = sizes[0]||null;
+    if (s) items.push({beden:s,renk: colors.siyah?'Siyah':(colors.taba?'Taba':'')});
+  }
+  return { items, adet: items.length|| (want2?2: (items.length?1:0)) };
+}
+
+function patchAddress(data, raw){
+  const t = (raw||'').toLowerCase().replace(/\s+/g,' ').trim();
+  if (!data.il) {
+    const f = ILER.find(x=> t.endsWith(' '+x) || t.includes(' '+x+' '));
+    if (f) data.il = f.toUpperCase();
+  }
+  // örnek: meram, ödemiş, vb. ufak heuristikler
+  if (!data.ilce) {
+    if (/\bmeram\b/.test(t)) data.ilce='MERAM';
+    if (/\bödemiş\b/.test(t)) data.ilce='ÖDEMİŞ';
+  }
+  if (!data.adres) {
+    const m = t.match(/(mah(alle)?|mh\.?)\s*[^,]+|sok(a|.)?\s*[^,]+|cad(de)?\s*[^,]+|no\.?\s*\d+/g);
+    if (m) data.adres = m.join(' ').replace(/\s{2,}/g,' ').trim();
+  }
+}
+
+function missingFields(data){
+  const d = data||{};
+  const miss=[];
+  if (!d.ad_soyad?.trim() || !/\S+\s+\S+/.test(d.ad_soyad)) miss.push('ad_soyad');
+  if (!d.adres?.trim()) miss.push('adres');
+  if (!d.ilce?.trim()) miss.push('ilce');
+  if (!d.il?.trim()) miss.push('il');
+  const it = d.items||[];
+  if (!it.length) { miss.push('beden','renk','adet'); }
+  else {
+    if (it.some(x=>!x.beden)) miss.push('beden');
+    if (it.some(x=>!x.renk)) miss.push('renk');
+    if (!(d.adet===1 || d.adet===2)) miss.push('adet');
+  }
+  return [...new Set(miss)];
+}
+
+function hasAll(data){ return missingFields(data).length===0; }
+
+function summaryText(d){
+  const items = (d.items||[]).map((x,i)=>`• ${i+1}) ${x.beden} – ${x.renk}`).join('\n');
+  const total = ((d.items||[]).length>=2) ? PRICE2 : PRICE1;
+  const phone = d.phone || '';
+  return `Sipariş özeti:\nAd Soyad: ${d.ad_soyad}\nAdres: ${d.adres}, ${d.ilce}/${d.il}\nTelefon: ${phone}\nÜrünler:\n${items}\nToplam: ${total}\nTeslimat: 2–5 iş günü | Kargo: Ücretsiz ve şeffaf\nÖdeme: Kapıda nakit/kart\nOnay için “EVET”, düzeltmek için “DÜZELT” yazın.`;
+}
+
 // --- 1 dk idle hatırlatma ---
 function scheduleIdleReminder(chatId) {
   clearTimeout(idleTimers.get(chatId));
   const t = setTimeout(async () => {
     try {
       const sess = sessions.get(chatId);
-      if (!sess || sess.muted || sess.stopReminders || sess.order) return;
-      const msgText = buildReminderTextTR(Array.isArray(sess.missingFields)
-        ? sess.missingFields
-        : ['ad_soyad','adres','ilce','il','beden','renk','adet']);
+      if (!sess || sess.muted || sess.stopReminders || sess.order) return; // sipariş varsa dürtme
+      const msgText = buildReminderTextTR(missingFields(sess.data));
       await client.sendMessage(chatId, msgText);
     } catch {}
   }, 60_000);
@@ -177,6 +238,7 @@ TEKNİK FORMAT:
   (Bilmediğin alanı boş bırak; örn. adet= )
 `.trim();
 
+    // Numara → önceki hafızayı yükle
     const phoneWp = chatId.split('@')[0];
     const prev = getCustomer('+'+phoneWp);
 
@@ -187,82 +249,78 @@ TEKNİK FORMAT:
       missingFields: ['ad_soyad','adres','ilce','il','beden','renk','adet'],
       sentTaba: false,
       sentSiyah: false,
-      data: prev.data || { ad_soyad:'', adres:'', ilce:'', il:'', beden:'', renk:'', adet:'' },
+      data: prev.data && Object.keys(prev.data).length ? prev.data : { ad_soyad:'', adres:'', ilce:'', il:'', items:[], adet:0, phone: ('+'+phoneWp) },
       order: prev.order || null,
-      _lastAsk: null,
-      _rate: {}
+      lastFaqAt: 0
     });
   }
   return sessions.get(chatId);
 }
 
-// --- AI: Alan çıkarımı (zorunlu JSON) ---
-async function aiExtractFields(userText, history = []) {
-  const sys = `
-Sen bir alan-çıkarıcısın. SADECE geçerli tek satır JSON döndür.
-ŞEMA:
-{
-  "ad_soyad": string | "",
-  "adres": string | "",
-  "ilce": string | "",
-  "il": string | "",
-  "beden": "40"|"41"|"42"|"43"|"44"|"",
-  "renk": "Siyah"|"Taba"|"",
-  "adet": "1"|"2"|"",
-  "intent": "siparis"|"soru"|"iptal"|"tesekkur"|"diger"
-}
-KURALLAR:
-- Renk eşleşmeleri: siyah/black -> "Siyah"; taba/kahverengi -> "Taba".
-- "iki", "2" -> "2"; "bir", "1" -> "1".
-- Ad soyad tek kelimeyse boş bırak.
-- 40–44 dışı beden görürsen boş bırak.
-- Sadece JSON yaz, açıklama YOK.
-`.trim();
+// --- AI çağrısı ---
+async function askAI(chatId, userText) {
+  const sess = bootstrap(chatId);
 
-  const messages = [
-    { role: 'system', content: sys },
-    ...history.slice(-6),
-    { role: 'user', content: userText }
-  ];
-
-  let out = "{}";
-  try {
-    const r = await ai.chat.completions.create({
-      model: OPENAI_MODEL,
-      temperature: 0.1,
-      messages
-      // response_format JSON destekliyorsa ekleyebilirsin: response_format:{type:"json_object"}
-    });
-    out = r.choices?.[0]?.message?.content?.trim() || "{}";
-  } catch {}
-
-  let data;
-  try { data = JSON.parse(out); } catch { data = null; }
-
-  if (!data || typeof data !== 'object') {
-    messages.unshift({ role:'system', content:'Yalnızca GEÇERLİ JSON yaz. Başka hiçbir şey yazma.' });
-    const r2 = await ai.chat.completions.create({ model: OPENAI_MODEL, temperature: 0, messages });
-    const out2 = r2.choices?.[0]?.message?.content?.trim() || "{}";
-    try { data = JSON.parse(out2); } catch { data = {}; }
+  if (sess.history.length > 24) {
+    sess.history = [sess.history[0], ...sess.history.slice(-12)];
   }
 
-  const norm = (s)=> String(s||'').trim();
-  const bedenOk = /^(40|41|42|43|44)$/.test(norm(data?.beden||''));
-  const renkMap = { siyah: 'Siyah', black: 'Siyah', taba: 'Taba', kahverengi: 'Taba' };
-  const renkIn = norm(data?.renk||'').toLowerCase();
-  const renkOk = renkMap[renkIn] || (['Siyah','Taba'].includes(data?.renk)?data.renk:'' );
-  const adetOk = /^(1|2)$/.test(norm(data?.adet||'')) ? norm(data.adet) : '';
+  const phoneWp = chatId.split('@')[0];
+  let meta = `WhatsApp Numarası: +${phoneWp}`;
 
-  return {
-    ad_soyad: norm(data?.ad_soyad||''),
-    adres: norm(data?.adres||''),
-    ilce: norm(data?.ilce||''),
-    il: norm(data?.il||''),
-    beden: bedenOk ? norm(data?.beden) : '',
-    renk: renkOk,
-    adet: adetOk,
-    intent: ['siparis','soru','iptal','tesekkur','diger'].includes(data?.intent) ? data.intent : 'diger'
-  };
+  const phoneProvided = pickPhoneTR(userText);
+  if (phoneProvided) {
+    meta += ` | Müşteri yeni telefon verdi: ${phoneProvided} (özette bunu kullan)`;
+    if (!sess.data.phone) sess.data.phone = phoneProvided; else sess.data.phone = phoneProvided; // güncelle
+  }
+
+  // STATE özetini enjekte et (model kararlılığı için)
+  const stateSummary = { ...sess.data, items: (sess.data.items||[]).slice(0,2) };
+  sess.history.push({ role: 'system', content: `STATE: ${JSON.stringify(stateSummary)}` });
+  sess.history.push({ role: 'user', content: `${userText}\n\n(${meta})` });
+
+  const res = await ai.chat.completions.create({
+    model: OPENAI_MODEL,
+    temperature: 0.3,
+    messages: sess.history
+  });
+
+  let reply = res.choices?.[0]?.message?.content || '';
+
+  // MISSING & FIELDS'i işle
+  const missing = extractMissing(reply);
+  if (missing && missing.length) sess.missingFields = missing;
+
+  const fields = extractFields(reply);
+  if (fields) {
+    // normalize
+    const norm = (k)=>({ 'ad soyad':'ad_soyad','adı soyadı':'ad_soyad','ilçe':'ilce','il ':'il','beden ':'beden','renk ':'renk','adet ':'adet' }[k]||k);
+    const normalized = Object.fromEntries(Object.entries(fields).map(([k,v])=>[norm(k),v]));
+    sess.data = { ...sess.data, ...normalized };
+    const phoneWp2 = chatId.split('@')[0];
+    saveCustomer('+'+phoneWp2, { data: sess.data, order: sess.order });
+  }
+
+  // teknik satırları sil
+  reply = reply
+    .replace(/\[MISSING:[^\]]+\]/gi, '')
+    .replace(/\[FIELDS:[^\]]+\]/gi, '')
+    .replace(/^[ \t]*\n+/gm, '')
+    .trim();
+
+  // siparişten sonra “tamamlayalım mı” türü çağrıları sustur
+  if (sess.order) {
+    reply = reply.replace(/.*siparişi tamamlayalım mı\?.*/gi, '').trim();
+  }
+
+  // model boşsa; state’e göre üret
+  if (!reply) {
+    const miss = missingFields(sess.data);
+    reply = miss.length ? buildReminderTextTR(miss) : summaryText(sess.data);
+  }
+
+  sess.history.push({ role: 'assistant', content: reply });
+  return reply;
 }
 
 // --- WhatsApp Eventleri ---
@@ -276,16 +334,6 @@ client.on('ready', () => {
   console.log('✅ WhatsApp bot hazır.');
 });
 
-function shouldSend(chatId, key, ms=20000){
-  const sess = sessions.get(chatId) || {};
-  const now = Date.now();
-  if (!sess._rate) sess._rate = {};
-  if (sess._rate[key] && (now - sess._rate[key] < ms)) return false;
-  sess._rate[key] = now;
-  sessions.set(chatId, sess);
-  return true;
-}
-
 client.on('message', async (msg) => {
   try {
     if (msg.fromMe) return;
@@ -295,18 +343,45 @@ client.on('message', async (msg) => {
 
     const sess = bootstrap(chatId);
 
-    // Yalnızca "EVET" onayı → dur
+    // Medya mesajlarında (görsel + caption) renk çıkarımı
+    if (msg.type === 'image') {
+      const cap = (msg.caption||'').toLowerCase();
+      if (cap) {
+        const upd = {};
+        if (/\bsiyah\b/.test(cap)) upd.renk = 'Siyah';
+        if (/\b(taba|kahverengi)\b/.test(cap)) upd.renk = 'Taba';
+        if (Object.keys(upd).length){
+          // items varsa boş renge doldur
+          if (!sess.data.items || !sess.data.items.length) sess.data.items = [{beden:'',renk:upd.renk}];
+          else {
+            const idx = sess.data.items.findIndex(x=>!x.renk);
+            if (idx>=0) sess.data.items[idx].renk = upd.renk; else if (sess.data.items.length<2) sess.data.items.push({beden:'',renk:upd.renk});
+          }
+          const phoneWp = chatId.split('@')[0];
+          saveCustomer('+'+phoneWp, { data: sess.data, order: sess.order });
+        }
+      }
+    }
+
+    // Yalnızca "EVET" onayı gelince dürtmeyi kalıcı kes + sipariş state
     if (/^\s*evet\s*$/i.test(text)) {
       sess.stopReminders = true;
       clearTimeout(idleTimers.get(chatId));
-      if (!sess.order) sess.order = { status: 'hazirlaniyor' };
+      if (!sess.order) sess.order = { status: 'hazirlaniyor', at: Date.now(), data: sess.data };
       const phoneWp = chatId.split('@')[0];
       saveCustomer('+'+phoneWp, { data: sess.data, order: sess.order });
       await msg.reply('Teşekkürler, siparişiniz hazırlanıyor. Kargoya verildiğinde bilgilendireceğiz.');
       return;
     }
+    if (/^\s*düzel(t|tmek)?\s*$/i.test(text)) {
+      sess.stopReminders=false;
+      const miss = missingFields(sess.data);
+      await msg.reply(buildReminderTextTR(miss));
+      if (!sessions.get(chatId).stopReminders) scheduleIdleReminder(chatId);
+      return;
+    }
 
-    // Kontrol komutları
+    // Kontrol komutları (TR)
     if (lower === 'temsilci') {
       sess.muted = true;
       await msg.reply('Sizi temsilciye aktarıyoruz. Teşekkürler!');
@@ -327,31 +402,93 @@ client.on('message', async (msg) => {
     }
     if (sess.muted) return;
 
-    // — Görsel talebi (AI'yi bypass et) — EN ÖNCE
-    if (/\b(foto|fotoğraf|fotograf|resim|görsel)\b/i.test(lower) || /renk(leri|) (al|gör|goster|göster)/i.test(lower)) {
-      const sent = [];
-      if (sess.data.renk === 'Siyah' && IMG_SIYAH) { await client.sendMessage(chatId, IMG_SIYAH); sent.push('siyah'); }
-      if (sess.data.renk === 'Taba'  && IMG_TABA)  { await client.sendMessage(chatId, IMG_TABA);  sent.push('taba'); }
-      if (!sent.length) {
-        if (IMG_SIYAH) await client.sendMessage(chatId, IMG_SIYAH);
-        if (IMG_TABA)  await client.sendMessage(chatId, IMG_TABA);
+    // --- Hızlı alan yakalama (AI öncesi) ---
+    {
+      // metinden çoklu ürün ayrıştır
+      const p = parseOrderText(text);
+      if (p.items.length) {
+        const now = Array.isArray(sess.data.items) ? sess.data.items : [];
+        for (const it of p.items){
+          const slot = (now.length<2) ? now.length : now.findIndex(x=>!x.renk || !x.beden);
+          if (slot===-1) now.push(it); else now[slot]= { beden: it.beden||now[slot]?.beden||'', renk: it.renk||now[slot]?.renk||'' };
+        }
+        sess.data.items = now.slice(0,2);
+        sess.data.adet = Math.max(sess.data.adet||0, sess.data.items.length);
       }
-      const need = ['beden','renk','adet','ad_soyad','adres','ilce','il'].filter(k => !sess.data[k]);
-      if (need.length && shouldSend(chatId,'ask_'+need[0])) {
-        const q =
-          need[0] === 'beden' ? 'Numaranız nedir? (40–44)' :
-          need[0] === 'renk'  ? 'Hangi renk? (Siyah/Taba)' :
-          need[0] === 'adet'  ? 'Kaç adet? (1 veya 2)' :
-          need[0] === 'ad_soyad' ? 'Ad soyadınızı yazar mısınız? (iki kelime)' :
-          need[0] === 'adres' ? 'Adres (mahalle/cadde + kapı/daire) nedir?' :
-          need[0] === 'ilce'  ? 'Hangi ilçe?' : 'Hangi il?';
-        await msg.reply(q);
+
+      // beden (tek sayı), adet (1/2), renk
+      const upd = {};
+      const mSize = lower.match(/(^|\D)(4[0-4])(?!\d)/);
+      if (mSize) {
+        if (!sess.data.items || !sess.data.items.length) sess.data.items=[{beden:mSize[2],renk:''}];
+        else {
+          const idx = sess.data.items.findIndex(x=>!x.beden);
+          if (idx>=0) sess.data.items[idx].beden = mSize[2];
+          else if (sess.data.items.length<2) sess.data.items.push({beden:mSize[2],renk:''});
+        }
       }
-      if (!sessions.get(chatId).stopReminders) scheduleIdleReminder(chatId);
-      return;
+      const mQty = lower.match(/(^|\s)([12])(\s*adet)?(\s|$)/);
+      if (mQty) sess.data.adet = Number(mQty[2]);
+      if (/\bsiyah\b|black/i.test(lower)) {
+        if (!sess.data.items || !sess.data.items.length) sess.data.items=[{beden:'',renk:'Siyah'}];
+        else {
+          const idx = sess.data.items.findIndex(x=>!x.renk);
+          if (idx>=0) sess.data.items[idx].renk = 'Siyah';
+          else if (sess.data.items.length<2) sess.data.items.push({beden:'',renk:'Siyah'});
+        }
+      }
+      if (/\btaba\b|kahverengi/i.test(lower)) {
+        if (!sess.data.items || !sess.data.items.length) sess.data.items=[{beden:'',renk:'Taba'}];
+        else {
+          const idx = sess.data.items.findIndex(x=>!x.renk);
+          if (idx>=0) sess.data.items[idx].renk = 'Taba';
+          else if (sess.data.items.length<2) sess.data.items.push({beden:'',renk:'Taba'});
+        }
+      }
+
+      // ad soyad (iki+ kelime, rakamsız) – sadece boşsa
+      if (!sess.data.ad_soyad && /^\s*[a-zçğıöşü]+(?:\s+[a-zçğıöşü]+)+\s*$/i.test(text) && !/\d/.test(text)) {
+        sess.data.ad_soyad = text.trim().replace(/\s+/g,' ');
+      }
+
+      // adres patch
+      patchAddress(sess.data, text);
+
+      const phoneWp = chatId.split('@')[0];
+      saveCustomer('+'+phoneWp, { data: sess.data, order: sess.order });
+
+      // Eğer sadece beden yakaladıysak kısa yönlendirme
+      if (mSize && !/\bsiyah\b|\btaba\b|kahverengi/i.test(lower) && !mQty) {
+        await msg.reply(`${mSize[2]} not edildi. Renk (Siyah/Taba) ve adet (1 veya 2) yazın.`);
+        if (!sessions.get(chatId).stopReminders) scheduleIdleReminder(chatId);
+        return;
+      }
     }
 
-    // --- Kargo durumu / takip soruları (AI bypass) ---
+    // — Renk teyidi görseli (bir kez gönder)
+    if (/\btaba\b/i.test(lower) || /\bkahverengi\b/i.test(lower)) {
+      if (!sess.sentTaba && IMG_TABA) {
+        await client.sendMessage(chatId, IMG_TABA);
+        sess.sentTaba = true;
+      }
+    }
+    if (/\bsiyah\b/i.test(lower) || /\bblack\b/i.test(lower)) {
+      if (!sess.sentSiyah && IMG_SIYAH) {
+        await client.sendMessage(chatId, IMG_SIYAH);
+        sess.sentSiyah = true;
+      }
+    }
+
+    // Kimlik soruları
+    for (const m of identityMap) {
+      if (m.keys.some(k => lower.includes(k))) {
+        await msg.reply(m.reply);
+        if (!sessions.get(chatId).stopReminders) scheduleIdleReminder(chatId);
+        return;
+      }
+    }
+
+    // --- Kargo durumu / takip soruları (AI'yi bypass et) ---
     const isCargoAsk = /\bkargo(m|)\b|\btakip\b|\bnerde\b|\bnerede\b|\bne zaman gelir\b/i.test(lower);
     if (isCargoAsk) {
       if (!sess.order) {
@@ -369,61 +506,38 @@ client.on('message', async (msg) => {
       return;
     }
 
-    // --- SSS (AI'siz hızlı yanıt) ---
-    for (const f of faqMap) {
-      if (f.keys.some(k => lower.includes(k))) {
-        await msg.reply(f.reply);
-        if (!sess.order && shouldSend(chatId,'after_faq')) {
-          await msg.reply('Siparişinizi tamamlayalım mı? Lütfen ad soyad, adres (ilçe/il), numara (40–44), renk (Siyah/Taba) ve adet (1 veya 2) bilgisini yazınız.');
-          if (!sessions.get(chatId).stopReminders) scheduleIdleReminder(chatId);
+    // --- SSS (regex + debounce) ---
+    if (Date.now() - (sess.lastFaqAt||0) > 30_000) {
+      for (const f of faqMap) {
+        if (f.regex.test(lower)) {
+          sess.lastFaqAt = Date.now();
+          await msg.reply(f.reply);
+          // SSS sonra state’e bak: eksik varsa sadece eksikleri iste
+          const miss = missingFields(sess.data);
+          if (miss.length) {
+            await msg.reply(buildReminderTextTR(miss));
+            if (!sessions.get(chatId).stopReminders) scheduleIdleReminder(chatId);
+          }
+          // Burada return ETME – akış devam etsin (özete geçebilirse geçsin)
+          break;
         }
-        return;
       }
     }
 
-    // --- AI ile alan çıkar (tek mesajdan çoklu değer) ---
-    {
-      const fields = await aiExtractFields(text, sess.history);
-      let changed = false;
-      for (const k of ['ad_soyad','adres','ilce','il','beden','renk','adet']) {
-        if (fields[k] && fields[k] !== sess.data[k]) { sess.data[k] = fields[k]; changed = true; }
-      }
-      if (changed) {
-        const phoneWp = chatId.split('@')[0];
-        saveCustomer('+'+phoneWp, { data: sess.data, order: sess.order });
-      }
-
-      // Eksik → sıradaki eksik alanı tek tek iste
-      const need = ['beden','renk','adet','ad_soyad','adres','ilce','il'].filter(k => !sess.data[k]);
-      if (need.length) {
-        if (shouldSend(chatId,'ask_'+need[0])) {
-          const q =
-            need[0] === 'beden' ? 'Numaranız nedir? (40–44)' :
-            need[0] === 'renk'  ? 'Hangi renk? (Siyah/Taba)' :
-            need[0] === 'adet'  ? 'Kaç adet? (1 veya 2)' :
-            need[0] === 'ad_soyad' ? 'Ad soyadınızı yazar mısınız? (iki kelime)' :
-            need[0] === 'adres' ? 'Adres (mahalle/cadde + kapı/daire) nedir?' :
-            need[0] === 'ilce'  ? 'Hangi ilçe?' : 'Hangi il?';
-          await msg.reply(q);
-        }
-        if (!sessions.get(chatId).stopReminders) scheduleIdleReminder(chatId);
-        return;
-      }
-
-      // Hiç eksik yoksa → ÖZET ve onay
-      if (!need.length) {
-        const { ad_soyad, adres, ilce, il, beden, renk, adet } = sess.data;
-        const total = (adet === '2') ? PRICE2 : PRICE1;
-        await msg.reply(
-          `Özet:\n- Ad Soyad: ${ad_soyad}\n- Adres: ${adres} (${ilce}/${il})\n- Beden: ${beden}\n- Renk: ${renk}\n- Adet: ${adet}\nToplam: ${total}\nTeslimat: 2–5 iş günü (kargo ücretsiz ve şeffaf).\nOnay için “EVET”, düzeltme için “DÜZELT” yazınız.`
-        );
-        sess.stopReminders = true;
-        return;
-      }
+    // Eğer tüm alanlar tamamsa ÖZET → EVET/DÜZELT → SUS
+    if (hasAll(sess.data) && !sess.order){
+      await msg.reply(summaryText(sess.data));
+      sess.stopReminders = true; // onay beklerken sus
+      return;
     }
 
-    // --- (Gerekirse) serbest AI cevabı ---
-    const reply = await askAI(chatId, text);
+    // AI'ye gönder (halen eksik varsa ya da serbest soruysa)
+    let reply = await askAI(chatId, text);
+    reply = (reply||'').trim();
+    if (!reply){
+      const miss = missingFields(sess.data);
+      reply = miss.length ? buildReminderTextTR(miss) : summaryText(sess.data);
+    }
     if (reply) {
       await msg.reply(reply);
       if (!sessions.get(chatId).stopReminders) scheduleIdleReminder(chatId);
