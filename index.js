@@ -340,6 +340,18 @@ client.on('message', async (msg) => {
     const chatId = msg.from;
     const text = (msg.body || '').trim();
     const lower = text.toLowerCase();
+    // "hakiki deri" gibi ifadeleri engelle
+const BANNED = [/hakiki\s*deri/gi, /%100\s*deri/gi];
+function sanitizeText(text) {
+  let out = String(text || '');
+  for (const r of BANNED) out = out.replace(r, 'Deridir');
+  return out;
+}
+
+// Deri sorusuna net yanıt
+if (/\b(deri|malzeme)\b/i.test(lower)) {
+  await client.sendMessage(chatId, 'Deridir. Kauçuk termo ortopedik tabandır efendim. %100 yerli üretimdir. Kaliteli ürünlerdir.');
+  return;
     if (/\b(foto(ğraf)?|resim|görsel)\b/i.test(lower)) {
   if (IMG_SIYAH) await client.sendMessage(chatId, IMG_SIYAH);
   if (IMG_TABA) await client.sendMessage(chatId, IMG_TABA);
