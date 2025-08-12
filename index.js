@@ -340,6 +340,15 @@ client.on('message', async (msg) => {
     const chatId = msg.from;
     const text = (msg.body || '').trim();
     const lower = text.toLowerCase();
+    if (/\b(foto(ğraf)?|resim|görsel)\b/i.test(lower)) {
+  if (IMG_SIYAH) await client.sendMessage(chatId, IMG_SIYAH);
+  if (IMG_TABA) await client.sendMessage(chatId, IMG_TABA);
+  const miss = missingFields(sess.data);
+  if (miss.length) await msg.reply(buildReminderTextTR(miss));
+  if (!sessions.get(chatId).stopReminders) scheduleIdleReminder(chatId);
+  return;
+}
+
 
     const sess = bootstrap(chatId);
 
