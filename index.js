@@ -57,6 +57,26 @@ function pickPhoneTR(text) {
   return '+90' + core;
 }
 
+// === Deterministik çıkarıcılar (40–44 dâhil) ===
+function pickSizes(text) {
+  if (!text) return [];
+  const m = [...text.matchAll(/\b(40|41|42|43|44)\b/g)];
+  return [...new Set(m.map(x => x[1]))];
+}
+function pickColors(text) {
+  const t = (text||'').toLowerCase();
+  const out = [];
+  if (/\bsiyah\b/.test(t)) out.push('Siyah');
+  if (/\btaba\b|\bkahverengi\b/.test(t)) out.push('Taba');
+  return [...new Set(out)];
+}
+function pickQty(text) {
+  const t = (text||'').toLowerCase();
+  if (/\b2\b|\biki\b/.test(t)) return '2';
+  if (/\b1\b|\bbir\b/.test(t)) return '1';
+  return '';
+}
+
 // MODEL ETİKETLERİ OKUMA
 function extractMissing(reply) {
   const all = [...String(reply).matchAll(/\[MISSING:([^\]]+)\]/gi)];
@@ -166,7 +186,17 @@ KURALLAR:
 4) Beden yalnızca 40–44. Renk yalnızca Siyah veya Taba. Adet 1 ya da 2. 2 adet ise iki renk/iki beden bilgisini netleştir.
 5) Kullanıcı karışık yazarsa (örn: “2 43 siyah”) anla ve ayıkla.
 6) Tüm alanlar tamamlanmadan özet gönderme; yalnızca eksik olan alanları iste.
-7) Nihai özet: ad soyad, adres (ilçe/il), **seçilen telefon**, adet, beden(ler), renk(ler), toplam (1=${PRICE1}, 2=${PRICE2}), teslimat 2–5 iş günü, kargo ücretsiz ve şeffaf. Onay için “EVET”, değişiklik için “DÜZELT” iste.
+7) Nihai özet MUTLAKA şu alanları bu biçimde içersin (BEDEN rakam şart):
+   • **Ad Soyad:** ...
+   • **Adres:** ... (İlçe/İl)
+   • **Telefon:** +90...
+   • **Adet:** 1|2
+   • **Beden(ler):** 44  veya 43,44
+   • **Renk(ler):** Siyah  veya Siyah,Taba
+   • **Toplam:** 1=${PRICE1}, 2=${PRICE2}
+   • **Teslimat:** 2–5 iş günü, kargo ücretsiz ve şeffaf
+   Onay için “EVET”, değişiklik için “DÜZELT” iste.
+8) Kullanıcı “44 numara” gibi kısa yazarsa bunu BEDEN olarak işle ve kaydet; asla atlama.
 
 TEKNİK FORMAT:
 - Her cevabın SONUNDA sadece sistem için şu satırı ekle:
@@ -196,7 +226,7 @@ TEKNİK FORMAT:
 }
 
 // --- AI çağrısı ---
-async function askAI(chatId, userText) {
+async function askAI(chatId, userText, metaHints='') {
   const sess = bootstrap(chatId);
 
   if (sess.history.length > 24) {
@@ -205,6 +235,7 @@ async function askAI(chatId, userText) {
 
   const phoneWp = chatId.split('@')[0];
   let meta = `WhatsApp Numarası: +${phoneWp}`;
+  if (metaHints) meta += ` | Ön-çıkarımlar: ${metaHints}`;
 
   const phoneProvided = pickPhoneTR(userText);
   if (phoneProvided) {
@@ -231,25 +262,30 @@ async function askAI(chatId, userText) {
     saveCustomer('+'+phoneWp, { data: sess.data, order: sess.order });
   }
 
-  // kullanıcıya teknik satırları asla gösterme (global temizle)
+  // teknik satırları gizle
   reply = reply
     .replace(/\[MISSING:[^\]]+\]/gi, '')
     .replace(/\[FIELDS:[^\]]+\]/gi, '')
     .replace(/^[ \t]*\n+/gm, '')
     .trim();
 
-  // siparişten sonra “tamamlayalım mı” türü çağrıları sustur
+  // siparişten sonra “tamamlayalım mı” sustur
   if (sess.order) {
     reply = reply.replace(/.*siparişi tamamlayalım mı\?.*/gi, '').trim();
   }
 
-  // model boş dökerse eksikleri iste
   if (!reply) {
     reply = buildReminderTextTR(Array.isArray(sess.missingFields) ? sess.missingFields : []);
   }
 
   sess.history.push({ role: 'assistant', content: reply });
   return reply;
+}
+
+// --- Özet olup olmadığını sez (guard) ---
+function looksLikeSummary(txt){
+  const t = (txt||'').toLowerCase();
+  return /\bonaylandı\b|\btamamlandı\b|\bözet\b/.test(t);
 }
 
 // --- WhatsApp Eventleri ---
@@ -343,6 +379,26 @@ client.on('message', async (msg) => {
       return;
     }
 
+    // === DETERMINİSTİK ÖN-ÇIKARIM ===
+    const sizes = pickSizes(text);
+    const colors = pickColors(text);
+    const qty    = pickQty(text);
+
+    if (qty) sess.data.adet = qty;
+    if (sizes.length) {
+      sess.data.beden = (sess.data.adet === '2' && sizes.length >= 2) ? `${sizes[0]},${sizes[1]}` : `${sizes[0]}`;
+    }
+    if (colors.length) {
+      sess.data.renk = (sess.data.adet === '2' && colors.length >= 2) ? `${colors[0]},${colors[1]}` : `${colors[0]}`;
+    }
+
+    // ipuçlarını AI'ye geçir
+    const hintsArr = [];
+    if (sess.data.beden) hintsArr.push(`beden=${sess.data.beden}`);
+    if (sess.data.renk)  hintsArr.push(`renk=${sess.data.renk}`);
+    if (sess.data.adet)  hintsArr.push(`adet=${sess.data.adet}`);
+    const metaHints = hintsArr.join('; ');
+
     // SSS (önce)
     for (const f of faqMap) {
       if (f.keys.some(k => lower.includes(k))) {
@@ -351,12 +407,38 @@ client.on('message', async (msg) => {
           await msg.reply('Siparişinizi tamamlayalım mı? Lütfen ad soyad, adres (ilçe/il), numara (40–44), renk (Siyah/Taba) ve adet (1 veya 2) bilgisini yazınız.');
           if (!sessions.get(chatId).stopReminders) scheduleIdleReminder(chatId);
         }
-        return; // << önemli: her durumda bu bloktan çık
+        return;
       }
     }
 
     // AI'ye gönder
-    const reply = await askAI(chatId, text);
+    const reply = await askAI(chatId, text, metaHints);
+
+    // === ÖZET/GUARD KONTROLLERİ ===
+    if (looksLikeSummary(reply)) {
+      // Beden yoksa özet gönderme
+      if (!sess.data.beden) {
+        await msg.reply('Numara belirtilmemiş. Lütfen **EU 40–44** aralığında numarayı yazınız (örn: 44).');
+        if (!sessions.get(chatId).stopReminders) scheduleIdleReminder(chatId);
+        return;
+      }
+      // 2 adet ise iki beden/renk zorunlu
+      if (sess.data.adet === '2') {
+        const hasTwoSizes = (sess.data.beden||'').includes(',');
+        const hasTwoColors = (sess.data.renk||'').includes(',');
+        if (!hasTwoSizes) {
+          await msg.reply('2 adet için iki **numara** belirtin (örn: 43,44).');
+          if (!sessions.get(chatId).stopReminders) scheduleIdleReminder(chatId);
+          return;
+        }
+        if (!sess.data.renk) {
+          await msg.reply('2 adet için renk(ler)i belirtin (örn: Siyah,Taba veya iki kez Siyah).');
+          if (!sessions.get(chatId).stopReminders) scheduleIdleReminder(chatId);
+          return;
+        }
+      }
+    }
+
     if (reply) {
       await msg.reply(reply);
       if (!sessions.get(chatId).stopReminders) scheduleIdleReminder(chatId);
